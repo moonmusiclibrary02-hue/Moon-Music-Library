@@ -1,0 +1,110 @@
+{
+  "timestamp": "2025-10-01T11:47:58.366581",
+  "total_tests": 17,
+  "passed_tests": 12,
+  "success_rate": "70.6%",
+  "test_details": [
+    {
+      "test": "User Registration",
+      "success": true,
+      "details": "User ID: 05d6ac9b-40f0-4393-bf94-13b29b4a0074",
+      "error": ""
+    },
+    {
+      "test": "User Login",
+      "success": true,
+      "details": "Token received, User: testuser_114756",
+      "error": ""
+    },
+    {
+      "test": "Get Current User",
+      "success": true,
+      "details": "Username: testuser_114756",
+      "error": ""
+    },
+    {
+      "test": "Create Track with Files",
+      "success": true,
+      "details": "Track ID: ca2ee873-d9ef-4730-8905-8b4fab9d53f5",
+      "error": ""
+    },
+    {
+      "test": "Create Track without Files",
+      "success": false,
+      "details": "",
+      "error": "Status: None, Error: No response"
+    },
+    {
+      "test": "Get All Tracks",
+      "success": true,
+      "details": "Found 2 tracks",
+      "error": ""
+    },
+    {
+      "test": "Search Tracks by Title",
+      "success": true,
+      "details": "Found 1 tracks",
+      "error": ""
+    },
+    {
+      "test": "Filter by Composer",
+      "success": true,
+      "details": "Found 1 tracks",
+      "error": ""
+    },
+    {
+      "test": "Filter by Singer",
+      "success": true,
+      "details": "Found 1 tracks",
+      "error": ""
+    },
+    {
+      "test": "Get Track Details",
+      "success": true,
+      "details": "Track: Test Track 114756",
+      "error": ""
+    },
+    {
+      "test": "Update Track",
+      "success": true,
+      "details": "Updated title: Updated Track 114756",
+      "error": ""
+    },
+    {
+      "test": "Download MP3 File",
+      "success": true,
+      "details": "File size: 52 bytes",
+      "error": ""
+    },
+    {
+      "test": "Download Lyrics File",
+      "success": true,
+      "details": "File size: 40 bytes",
+      "error": ""
+    },
+    {
+      "test": "Delete Track",
+      "success": false,
+      "details": "",
+      "error": "No track ID available"
+    },
+    {
+      "test": "Invalid Login Handling",
+      "success": false,
+      "details": "",
+      "error": "Expected 401, got None"
+    },
+    {
+      "test": "Unauthorized Access Handling",
+      "success": false,
+      "details": "",
+      "error": "Expected 401, got None"
+    },
+    {
+      "test": "Non-existent Track Handling",
+      "success": false,
+      "details": "",
+      "error": "Expected 404, got None"
+    }
+  ]
+}

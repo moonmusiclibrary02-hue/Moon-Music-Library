@@ -1,0 +1,1699 @@
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Form, status, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, Response
+from dotenv import load_dotenv
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+import hashlib
+from jose import JWTError, jwt
+from datetime import datetime, timedelta, timezone
+import os
+import logging
+from pathlib import Path
+from pydantic import BaseModel, Field
+from typing import List, Optional
+import uuid
+import aiofiles
+import mimetypes
+from bson import ObjectId
+import pandas as pd
+import openpyxl
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+import io
+import urllib.request
+import re
+from urllib.parse import urlparse, parse_qs
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv()
+
+# Security
+SECRET_KEY = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+# Simple password hashing with SHA256
+security = HTTPBearer()
+
+# MongoDB connection
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
+
+# Create uploads directory
+UPLOADS_DIR = Path("/app/uploads")
+UPLOADS_DIR.mkdir(exist_ok=True)
+
+# Create the main app
+app = FastAPI(title="Music Production Inventory")
+
+# Mount static files under /api/files to ensure proper routing with CORS support
+class CORSStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope) -> Response:
+        response = await super().get_response(path, scope)
+        # Add CORS headers for audio files
+        if path.endswith(('.mp3', '.wav', '.ogg', '.m4a', '.flac')):
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "*"
+        return response
+
+app.mount("/api/files", CORSStaticFiles(directory="/app/uploads"), name="files")
+
+# Create a router with the /api prefix
+api_router = APIRouter(prefix="/api")
+
+# Models
+class User(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    username: str
+    email: str
+    user_type: str = "admin"  # "admin" or "manager"
+    manager_id: Optional[str] = None  # Link to manager record if user_type is "manager"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class UserCreate(BaseModel):
+    username: str
+    email: str
+    password: str
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+class AdminPasswordUpdateRequest(BaseModel):
+    user_id: str
+    new_password: str
+    notify_user: bool = True
+
+class Manager(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    email: str
+    assigned_language: str
+    phone: Optional[str] = None
+    is_active: bool = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_by: str
+
+class ManagerCreate(BaseModel):
+    name: str
+    email: str
+    assigned_language: str
+    phone: Optional[str] = None
+    custom_password: Optional[str] = None  # Admin can set custom password
+
+class ManagerUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    assigned_language: Optional[str] = None
+    phone: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    user: User
+
+class MusicTrack(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    unique_code: Optional[str] = None  # User-provided unique identifier for the track
+    rights_type: Optional[str] = None  # "original" or "multi_rights"
+    track_category: Optional[str] = None  # "cover_song" or "original_composition" (only for original tracks)
+    rights_details: Optional[str] = None  # "multi_rights" or "own_rights"
+    serial_number: Optional[str] = None  # Auto-generated based on rights_type (OC or MR prefix)
+    title: str
+    music_composer: str
+    lyricist: str
+    singer_name: str
+    tempo: Optional[str] = None
+    scale: Optional[str] = None
+    audio_language: str
+    release_date: Optional[str] = None
+    album_name: Optional[str] = None
+    other_info: Optional[str] = None
+    mp3_file_path: Optional[str] = None
+    lyrics_file_path: Optional[str] = None
+    session_file_path: Optional[str] = None
+    singer_agreement_file_path: Optional[str] = None
+    music_director_agreement_file_path: Optional[str] = None
+    mp3_filename: Optional[str] = None
+    lyrics_filename: Optional[str] = None
+    session_filename: Optional[str] = None
+    singer_agreement_filename: Optional[str] = None
+    music_director_agreement_filename: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_by: str
+    managed_by: Optional[str] = None
+
+class MusicTrackCreate(BaseModel):
+    unique_code: str
+    rights_type: str  # "original" or "multi_rights"
+    track_category: Optional[str] = None  # "cover_song" or "original_composition" (only for original tracks)
+    rights_details: Optional[str] = None  # "multi_rights" or "own_rights"
+    title: str
+    music_composer: str
+    lyricist: str
+    singer_name: str
+    tempo: Optional[str] = None
+    scale: Optional[str] = None
+    audio_language: str
+    release_date: Optional[str] = None
+    album_name: Optional[str] = None
+    other_info: Optional[str] = None
+
+class MusicTrackUpdate(BaseModel):
+    unique_code: Optional[str] = None
+    rights_type: Optional[str] = None
+    track_category: Optional[str] = None
+    rights_details: Optional[str] = None
+    title: Optional[str] = None
+    music_composer: Optional[str] = None
+    lyricist: Optional[str] = None
+    singer_name: Optional[str] = None
+    tempo: Optional[str] = None
+    scale: Optional[str] = None
+    audio_language: Optional[str] = None
+    release_date: Optional[str] = None
+    album_name: Optional[str] = None
+    other_info: Optional[str] = None
+
+class BulkUploadResponse(BaseModel):
+    successful_count: int
+    failed_count: int
+    errors: List[dict] = []
+    successful_tracks: List[str] = []
+
+# Security functions
+def verify_password(plain_password, hashed_password):
+    return hashlib.sha256(plain_password.encode()).hexdigest() == hashed_password
+
+def get_password_hash(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Could not validate credentials")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Could not validate credentials")
+    
+    user = await db.users.find_one({"id": user_id})
+    if user is None:
+        raise HTTPException(status_code=401, detail="User not found")
+    return User(**user)
+
+# Mock Email Service (replace with real email service later)
+async def send_manager_login_credentials(email: str, name: str, password: str, password_source: str = "auto-generated"):
+    """
+    Mock email service that logs manager login credentials.
+    In production, replace this with actual email sending (SendGrid, etc.)
+    """
+    email_content = f"""
+    ═══════════════════════════════════════════════════════
+    🎵 MOON MUSIC - Manager Account Created
+    ═══════════════════════════════════════════════════════
+    
+    Hello {name},
+    
+    Your manager account has been created for Moon Music Inventory System.
+    
+    🔑 Login Credentials:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    📧 Email: {email}
+    🔒 Password: {password}
+    🌐 Login URL: https://music-tracker-6.preview.emergentagent.com
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    📌 Important Notes:
+    • Please change your password after first login
+    • You can access the Manager Profile to update your information
+    • Contact your administrator if you have any issues
+    
+    Welcome to the team!
+    
+    ═══════════════════════════════════════════════════════
+    """
+    
+    # Log to server console (visible in supervisorctl logs)
+    logger.info("="*60)
+    logger.info("📧 MANAGER LOGIN CREDENTIALS SENT")
+    logger.info("="*60)
+    logger.info(f"Manager: {name}")
+    logger.info(f"Email: {email}")
+    logger.info(f"Password: {password}")
+    logger.info(f"Password Type: {password_source}")
+    logger.info(f"Login URL: https://music-tracker-6.preview.emergentagent.com")
+    logger.info("="*60)
+    
+    # Store email log in database for admin reference
+    email_log = {
+        "id": str(uuid.uuid4()),
+        "recipient_email": email,
+        "recipient_name": name,
+        "subject": "Moon Music - Manager Account Created",
+        "content": email_content,
+        "credentials": {
+            "email": email,
+            "password": password,
+            "password_source": password_source
+        },
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+        "status": "logged",  # In production, this would be "sent"
+        "type": "manager_credentials"
+    }
+    
+    await db.email_logs.insert_one(email_log)
+    logger.info(f"📝 Email logged to database with ID: {email_log['id']}")
+    
+    return True
+
+async def send_password_update_notification(email: str, username: str, new_password: str):
+    """
+    Send password update notification to user
+    """
+    email_content = f"""
+    ═══════════════════════════════════════════════════════
+    🎵 MOON MUSIC - Password Updated
+    ═══════════════════════════════════════════════════════
+    
+    Hello {username},
+    
+    Your password has been updated by an administrator.
+    
+    🔑 New Login Credentials:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    📧 Email: {email}
+    🔒 New Password: {new_password}
+    🌐 Login URL: https://music-tracker-6.preview.emergentagent.com
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    📌 Important Notes:
+    • Please change your password after logging in for security
+    • Contact your administrator if you have any issues
+    • Keep your password secure and don't share it
+    
+    Best regards,
+    Moon Music Team
+    
+    ═══════════════════════════════════════════════════════
+    """
+    
+    # Log to server console
+    logger.info("="*60)
+    logger.info("📧 PASSWORD UPDATE NOTIFICATION")
+    logger.info("="*60)
+    logger.info(f"User: {username}")
+    logger.info(f"Email: {email}")
+    logger.info(f"New Password: {new_password}")
+    logger.info("="*60)
+    
+    # Store email log in database
+    email_log = {
+        "id": str(uuid.uuid4()),
+        "recipient_email": email,
+        "recipient_name": username,
+        "subject": "Moon Music - Password Updated",
+        "content": email_content,
+        "credentials": {
+            "email": email,
+            "password": new_password,
+            "password_source": "admin-updated"
+        },
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+        "status": "logged",
+        "type": "password_update"
+    }
+    
+    await db.email_logs.insert_one(email_log)
+    return True
+
+async def send_password_reset_notification(email: str, username: str, new_password: str, admin_name: str):
+    """
+    Send password reset notification to user
+    """
+    email_content = f"""
+    ═══════════════════════════════════════════════════════
+    🎵 MOON MUSIC - Password Reset by Administrator
+    ═══════════════════════════════════════════════════════
+    
+    Hello {username},
+    
+    Your password has been reset by administrator {admin_name}.
+    
+    🔑 New Login Credentials:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    📧 Email: {email}
+    🔒 New Password: {new_password}
+    🌐 Login URL: https://music-tracker-6.preview.emergentagent.com
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    📌 Important Security Notes:
+    • This password was generated automatically for security
+    • Please login and change it to your preferred password immediately
+    • Never share your password with anyone
+    • Contact your administrator if you didn't request this reset
+    
+    Reset by: {admin_name}
+    Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
+    
+    Best regards,
+    Moon Music Team
+    
+    ═══════════════════════════════════════════════════════
+    """
+    
+    # Log to server console
+    logger.info("="*60)
+    logger.info("📧 PASSWORD RESET NOTIFICATION")
+    logger.info("="*60)
+    logger.info(f"User: {username}")
+    logger.info(f"Email: {email}")
+    logger.info(f"New Password: {new_password}")
+    logger.info(f"Reset by Admin: {admin_name}")
+    logger.info("="*60)
+    
+    # Store email log in database
+    email_log = {
+        "id": str(uuid.uuid4()),
+        "recipient_email": email,
+        "recipient_name": username,
+        "subject": "Moon Music - Password Reset",
+        "content": email_content,
+        "credentials": {
+            "email": email,
+            "password": new_password,
+            "password_source": "admin-reset"
+        },
+        "reset_by": admin_name,
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+        "status": "logged",
+        "type": "password_reset"
+    }
+    
+    await db.email_logs.insert_one(email_log)
+    return True
+
+# Helper functions
+def prepare_for_mongo(data):
+    """Convert datetime objects to ISO strings for MongoDB storage"""
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(value, datetime):
+                data[key] = value.isoformat()
+    return data
+
+def parse_from_mongo(item):
+    """Parse datetime strings from MongoDB"""
+    if isinstance(item, dict):
+        for key, value in item.items():
+            if key in ['created_at'] and isinstance(value, str):
+                try:
+                    item[key] = datetime.fromisoformat(value)
+                except:
+                    pass
+    return item
+
+def extract_google_drive_file_id(url):
+    """Extract file ID from Google Drive URL"""
+    if not url or not isinstance(url, str):
+        return None
+    
+    # Various Google Drive URL patterns
+    patterns = [
+        r'/file/d/([a-zA-Z0-9-_]+)',  # Standard sharing URL
+        r'id=([a-zA-Z0-9-_]+)',       # URL parameter
+        r'drive.google.com/open\?id=([a-zA-Z0-9-_]+)',
+        r'drive.google.com/uc\?id=([a-zA-Z0-9-_]+)'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    
+    return None
+
+async def download_from_google_drive(url, filename):
+    """Download file from Google Drive URL"""
+    try:
+        file_id = extract_google_drive_file_id(url)
+        if not file_id:
+            raise ValueError("Could not extract file ID from Google Drive URL")
+        
+        # Use direct download URL
+        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        
+        # Download the file
+        file_path = UPLOADS_DIR / filename
+        urllib.request.urlretrieve(download_url, file_path)
+        
+        return str(file_path)
+    except Exception as e:
+        logger.error(f"Error downloading from Google Drive: {e}")
+        raise ValueError(f"Failed to download file from Google Drive: {str(e)}")
+
+def generate_excel_template():
+    """Generate Excel template for bulk upload"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Bulk Track Upload"
+    
+    # Define headers
+    headers = [
+        'Title*', 'Music Composer*', 'Lyricist*', 'Singer Name*', 
+        'Audio Language*', 'Rights Type*', 'Track Category', 
+        'Tempo', 'Scale', 'Album Name', 'Release Date', 
+        'Other Info', 'Audio File Google Drive Link', 
+        'Lyrics File Google Drive Link', 'Session File Google Drive Link',
+        'Singer Agreement Google Drive Link', 'Music Director Agreement Google Drive Link'
+    ]
+    
+    # Add headers
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=header)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    
+    # Add sample data row
+    sample_data = [
+        'My Song Title', 'John Composer', 'Jane Lyricist', 'Singer Name',
+        'English', 'original', 'original_composition', 
+        '120 BPM', 'C Major', 'My Album', '2024-01-15',
+        'Additional song information', 
+        'https://drive.google.com/file/d/your_audio_file_id/view',
+        'https://drive.google.com/file/d/your_lyrics_file_id/view',
+        'https://drive.google.com/file/d/your_session_file_id/view',
+        'https://drive.google.com/file/d/your_singer_agreement_id/view',
+        'https://drive.google.com/file/d/your_music_director_agreement_id/view'
+    ]
+    
+    for col, data in enumerate(sample_data, 1):
+        ws.cell(row=2, column=col, value=data)
+    
+    # Add instructions sheet
+    instructions_ws = wb.create_sheet("Instructions")
+    instructions = [
+        "BULK UPLOAD INSTRUCTIONS:",
+        "",
+        "1. Fill in the required fields marked with * (asterisk)",
+        "2. Rights Type must be either 'original' or 'multi_rights'",
+        "3. Track Category (only for original tracks): 'original_composition' or 'cover_song'",
+        "4. Audio Language should match your assigned language (for managers)",
+        "5. Release Date format: YYYY-MM-DD (e.g., 2024-01-15)",
+        "",
+        "GOOGLE DRIVE LINKS:",
+        "- Make sure files are set to 'Anyone with the link can view'",
+        "- Use the shareable link from Google Drive",
+        "- Audio files should be MP3 format",
+        "- Session files should be ZIP or RAR format",
+        "- Agreement files should be PDF format",
+        "",
+        "SUPPORTED FILE TYPES:",
+        "- Audio: MP3",
+        "- Lyrics: TXT, DOC, DOCX",
+        "- Session: ZIP, RAR",
+        "- Agreements: PDF",
+        "",
+        "NOTE: All files will be downloaded from Google Drive during upload process."
+    ]
+    
+    for row, instruction in enumerate(instructions, 1):
+        cell = instructions_ws.cell(row=row, column=1, value=instruction)
+        if row == 1:
+            cell.font = Font(bold=True, size=14)
+        elif instruction.endswith(":"):
+            cell.font = Font(bold=True)
+    
+    # Adjust column widths
+    for sheet in [ws, instructions_ws]:
+        for column in sheet.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            sheet.column_dimensions[column_letter].width = adjusted_width
+    
+    return wb
+
+async def process_bulk_upload_row(row_data, row_number, current_user):
+    """Process a single row from bulk upload Excel"""
+    try:
+        # Extract data from row
+        title = str(row_data.get('Title*', '')).strip()
+        music_composer = str(row_data.get('Music Composer*', '')).strip()
+        lyricist = str(row_data.get('Lyricist*', '')).strip()
+        singer_name = str(row_data.get('Singer Name*', '')).strip()
+        audio_language = str(row_data.get('Audio Language*', '')).strip()
+        rights_type = str(row_data.get('Rights Type*', '')).strip()
+        
+        # Validate required fields
+        required_fields = {
+            'Title': title,
+            'Music Composer': music_composer,
+            'Lyricist': lyricist,
+            'Singer Name': singer_name,
+            'Audio Language': audio_language,
+            'Rights Type': rights_type
+        }
+        
+        missing_fields = [field for field, value in required_fields.items() if not value]
+        if missing_fields:
+            return None, f"Missing required fields: {', '.join(missing_fields)}"
+        
+        # Validate rights type
+        if rights_type not in ['original', 'multi_rights']:
+            return None, f"Invalid rights type '{rights_type}'. Must be 'original' or 'multi_rights'"
+        
+        # Handle optional fields
+        track_category = str(row_data.get('Track Category', '')).strip() or None
+        tempo = str(row_data.get('Tempo', '')).strip() or None
+        scale = str(row_data.get('Scale', '')).strip() or None
+        album_name = str(row_data.get('Album Name', '')).strip() or None
+        release_date = str(row_data.get('Release Date', '')).strip() or None
+        other_info = str(row_data.get('Other Info', '')).strip() or None
+        
+        # Validate track category for original tracks
+        if rights_type == 'original' and track_category not in ['cover_song', 'original_composition']:
+            return None, f"For original tracks, track category must be 'cover_song' or 'original_composition'"
+        
+        # For managers, validate language
+        if current_user.user_type == "manager" and current_user.manager_id:
+            manager_record = await db.managers.find_one({"id": current_user.manager_id})
+            if manager_record and manager_record.get("assigned_language"):
+                assigned_language = manager_record["assigned_language"]
+                if audio_language != assigned_language:
+                    return None, f"You can only upload tracks in your assigned language: {assigned_language}"
+        
+        # Generate unique code and serial number
+        # Get language code (first 3 characters, uppercase)
+        language_code = audio_language[:3].upper()
+        
+        # Determine prefix based on rights type and category
+        if rights_type == "original":
+            if track_category == "original_composition":
+                prefix = f"{language_code}-OC"
+            else:  # cover_song
+                prefix = f"{language_code}-OCC"
+        else:  # multi_rights
+            prefix = f"{language_code}-MR"
+        
+        # Get the next number for this prefix
+        last_track = await db.tracks.find_one(
+            {"unique_code": {"$regex": f"^{prefix}"}},
+            sort=[("unique_code", -1)]
+        )
+        
+        if last_track and last_track.get("unique_code"):
+            try:
+                last_number = int(last_track["unique_code"].split(prefix)[1])
+                next_number = last_number + 1
+            except (ValueError, IndexError):
+                next_number = 1
+        else:
+            next_number = 1
+        
+        unique_code = f"{prefix}{next_number:04d}"
+        
+        # Generate serial number
+        serial_prefix = "OC" if rights_type == "original" else "MR"
+        last_serial_track = await db.tracks.find_one(
+            {"serial_number": {"$regex": f"^{serial_prefix}"}},
+            sort=[("serial_number", -1)]
+        )
+        
+        if last_serial_track and last_serial_track.get("serial_number"):
+            try:
+                last_serial_number = int(last_serial_track["serial_number"][2:])
+                next_serial_number = last_serial_number + 1
+            except (ValueError, IndexError):
+                next_serial_number = 1
+        else:
+            next_serial_number = 1
+        
+        serial_number = f"{serial_prefix}{next_serial_number:04d}"
+        
+        # Handle file downloads from Google Drive
+        file_paths = {}
+        file_names = {}
+        
+        google_drive_fields = {
+            'Audio File Google Drive Link': ('mp3_file_path', 'mp3_filename', '.mp3'),
+            'Lyrics File Google Drive Link': ('lyrics_file_path', 'lyrics_filename', '.txt'),
+            'Session File Google Drive Link': ('session_file_path', 'session_filename', '.zip'),
+            'Singer Agreement Google Drive Link': ('singer_agreement_file_path', 'singer_agreement_filename', '.pdf'),
+            'Music Director Agreement Google Drive Link': ('music_director_agreement_file_path', 'music_director_agreement_filename', '.pdf')
+        }
+        
+        for field_name, (path_key, filename_key, extension) in google_drive_fields.items():
+            google_drive_url = str(row_data.get(field_name, '')).strip()
+            if google_drive_url and google_drive_url.lower() != 'nan':
+                try:
+                    filename = f"{uuid.uuid4()}{extension}"
+                    file_path = await download_from_google_drive(google_drive_url, filename)
+                    file_paths[path_key] = file_path
+                    file_names[filename_key] = filename
+                except Exception as e:
+                    return None, f"Error downloading {field_name}: {str(e)}"
+        
+        # Set managed_by for managers
+        managed_by = None
+        if current_user.user_type == "manager" and current_user.manager_id:
+            managed_by = current_user.manager_id
+        
+        # Create track
+        track = MusicTrack(
+            unique_code=unique_code,
+            rights_type=rights_type,
+            track_category=track_category,
+            serial_number=serial_number,
+            title=title,
+            music_composer=music_composer,
+            lyricist=lyricist,
+            singer_name=singer_name,
+            tempo=tempo,
+            scale=scale,
+            audio_language=audio_language,
+            release_date=release_date,
+            album_name=album_name,
+            other_info=other_info,
+            created_by=current_user.id,
+            managed_by=managed_by,
+            **file_paths,
+            **file_names
+        )
+        
+        track_dict = prepare_for_mongo(track.dict())
+        await db.tracks.insert_one(track_dict)
+        
+        return track.id, None
+        
+    except Exception as e:
+        logger.error(f"Error processing row {row_number}: {e}")
+        return None, f"Unexpected error: {str(e)}"
+
+# Routes
+@api_router.post("/auth/register", response_model=User)
+async def register(user_data: UserCreate):
+    # Check if user exists
+    existing_user = await db.users.find_one({"email": user_data.email})
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Create user
+    hashed_password = get_password_hash(user_data.password)
+    user = User(
+        username=user_data.username,
+        email=user_data.email
+    )
+    
+    user_dict = user.dict()
+    user_dict["hashed_password"] = hashed_password
+    user_dict = prepare_for_mongo(user_dict)
+    
+    await db.users.insert_one(user_dict)
+    return user
+
+@api_router.post("/auth/login", response_model=Token)
+async def login(user_data: UserLogin):
+    user = await db.users.find_one({"email": user_data.email})
+    if not user or not verify_password(user_data.password, user["hashed_password"]):
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+    
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user["id"]}, expires_delta=access_token_expires
+    )
+    
+    user_obj = User(**parse_from_mongo(user))
+    return Token(access_token=access_token, token_type="bearer", user=user_obj)
+
+@api_router.get("/auth/me", response_model=User)
+async def get_me(current_user: User = Depends(get_current_user)):
+    return current_user
+
+@api_router.post("/auth/forgot-password")
+async def forgot_password(request: ForgotPasswordRequest):
+    user = await db.users.find_one({"email": request.email})
+    if not user:
+        # Don't reveal if user exists or not for security
+        return {"message": "If an account with that email exists, a password reset link has been sent."}
+    
+    # Generate reset token (valid for 1 hour)
+    reset_token = create_access_token(
+        data={"sub": user["id"], "type": "password_reset"}, 
+        expires_delta=timedelta(hours=1)
+    )
+    
+    # In production, you would send this token via email
+    # For demo purposes, we'll return it in the response
+    return {
+        "message": "If an account with that email exists, a password reset link has been sent.",
+        "reset_token": reset_token,  # In production, this would be sent via email
+        "instructions": "Use this token to reset your password. In production, this would be sent to your email."
+    }
+
+@api_router.post("/auth/reset-password")
+async def reset_password(request: ResetPasswordRequest):
+    try:
+        # Verify the reset token
+        payload = jwt.decode(request.token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        token_type: str = payload.get("type")
+        
+        if token_type != "password_reset":
+            raise HTTPException(status_code=400, detail="Invalid token type")
+            
+        if user_id is None:
+            raise HTTPException(status_code=400, detail="Invalid token")
+            
+    except JWTError:
+        raise HTTPException(status_code=400, detail="Invalid or expired token")
+    
+    # Update user's password
+    hashed_password = get_password_hash(request.new_password)
+    result = await db.users.update_one(
+        {"id": user_id}, 
+        {"$set": {"hashed_password": hashed_password}}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return {"message": "Password successfully reset"}
+
+@api_router.post("/managers", response_model=Manager)
+async def create_manager(manager_data: ManagerCreate, current_user: User = Depends(get_current_user)):
+    # Only admins can create managers
+    if current_user.user_type != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    # Check if manager with same email exists
+    existing_manager = await db.managers.find_one({"email": manager_data.email})
+    if existing_manager:
+        raise HTTPException(status_code=400, detail="Manager with this email already exists")
+    
+    # Check if user with same email exists
+    existing_user = await db.users.find_one({"email": manager_data.email})
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User with this email already exists")
+    
+    # Create manager record
+    manager = Manager(
+        name=manager_data.name,
+        email=manager_data.email,
+        assigned_language=manager_data.assigned_language,
+        phone=manager_data.phone,
+        created_by=current_user.id
+    )
+    
+    manager_dict = prepare_for_mongo(manager.dict())
+    await db.managers.insert_one(manager_dict)
+    
+    # Use custom password if provided, otherwise generate random password
+    if manager_data.custom_password and manager_data.custom_password.strip():
+        temp_password = manager_data.custom_password.strip()
+        password_source = "admin-set"
+    else:
+        import secrets
+        import string
+        temp_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12))
+        password_source = "auto-generated"
+    
+    # Create user account for manager
+    manager_user = User(
+        username=manager_data.name,
+        email=manager_data.email,
+        user_type="manager",
+        manager_id=manager.id
+    )
+    
+    user_dict = manager_user.dict()
+    user_dict["hashed_password"] = get_password_hash(temp_password)
+    user_dict = prepare_for_mongo(user_dict)
+    
+    await db.users.insert_one(user_dict)
+    
+    # Mock email service - log credentials and store in database
+    await send_manager_login_credentials(manager_data.email, manager_data.name, temp_password, password_source)
+    
+    return manager
+
+@api_router.get("/managers", response_model=List[Manager])
+async def get_managers(current_user: User = Depends(get_current_user)):
+    # Only admins can view managers list
+    if current_user.user_type != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    managers = await db.managers.find({"is_active": True}).to_list(1000)
+    return [Manager(**parse_from_mongo(manager)) for manager in managers]
+
+@api_router.get("/managers/{manager_id}", response_model=Manager)
+async def get_manager(manager_id: str, current_user: User = Depends(get_current_user)):
+    # Only admins can view individual manager details
+    if current_user.user_type != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+        
+    manager = await db.managers.find_one({"id": manager_id, "is_active": True})
+    if not manager:
+        raise HTTPException(status_code=404, detail="Manager not found")
+    return Manager(**parse_from_mongo(manager))
+
+@api_router.put("/managers/{manager_id}", response_model=Manager)
+async def update_manager(
+    manager_id: str, 
+    manager_update: ManagerUpdate, 
+    current_user: User = Depends(get_current_user)
+):
+    # Only admins can update managers
+    if current_user.user_type != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+        
+    manager = await db.managers.find_one({"id": manager_id, "is_active": True})
+    if not manager:
+        raise HTTPException(status_code=404, detail="Manager not found")
+    
+    update_data = {k: v for k, v in manager_update.dict().items() if v is not None}
+    
+    if update_data:
+        await db.managers.update_one({"id": manager_id}, {"$set": update_data})
+    
+    updated_manager = await db.managers.find_one({"id": manager_id})
+    return Manager(**parse_from_mongo(updated_manager))
+
+@api_router.delete("/managers/{manager_id}")
+async def delete_manager(manager_id: str, current_user: User = Depends(get_current_user)):
+    # Only admins can delete managers
+    if current_user.user_type != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+        
+    manager = await db.managers.find_one({"id": manager_id, "is_active": True})
+    if not manager:
+        raise HTTPException(status_code=404, detail="Manager not found")
+    
+    # Soft delete - set is_active to False
+    await db.managers.update_one({"id": manager_id}, {"$set": {"is_active": False}})
+    return {"message": "Manager deleted successfully"}
+
+@api_router.get("/profile", response_model=dict)
+async def get_profile(current_user: User = Depends(get_current_user)):
+    profile = {
+        "id": current_user.id,
+        "username": current_user.username,
+        "email": current_user.email,
+        "user_type": current_user.user_type,
+        "created_at": current_user.created_at
+    }
+    
+    # If user is a manager, include manager details
+    if current_user.user_type == "manager" and current_user.manager_id:
+        manager = await db.managers.find_one({"id": current_user.manager_id})
+        if manager:
+            profile["manager_details"] = {
+                "name": manager["name"],
+                "assigned_language": manager["assigned_language"],
+                "phone": manager.get("phone"),
+                "is_active": manager.get("is_active", True)
+            }
+    
+    return profile
+
+@api_router.put("/profile/password")
+async def update_password(
+    old_password: str = Form(...),
+    new_password: str = Form(...),
+    current_user: User = Depends(get_current_user)
+):
+    # Get current user from database
+    user = await db.users.find_one({"id": current_user.id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Verify old password
+    if not verify_password(old_password, user["hashed_password"]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    
+    # Update password
+    hashed_new_password = get_password_hash(new_password)
+    await db.users.update_one(
+        {"id": current_user.id}, 
+        {"$set": {"hashed_password": hashed_new_password}}
+    )
+    
+    return {"message": "Password updated successfully"}
+
+@api_router.put("/admin/users/{user_id}/password")
+async def admin_update_user_password(
+    user_id: str,
+    password_data: AdminPasswordUpdateRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """Admin endpoint to update any user's password"""
+    if current_user.user_type != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    # Find the target user
+    target_user = await db.users.find_one({"id": user_id})
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Update password
+    hashed_new_password = get_password_hash(password_data.new_password)
+    await db.users.update_one(
+        {"id": user_id}, 
+        {"$set": {"hashed_password": hashed_new_password}}
+    )
+    
+    # Send notification if requested
+    if password_data.notify_user:
+        await send_password_update_notification(
+            target_user["email"], 
+            target_user["username"], 
+            password_data.new_password
+        )
+    
+    return {
+        "message": f"Password updated successfully for user {target_user['username']}",
+        "notification_sent": password_data.notify_user
+    }
+
+@api_router.get("/admin/users")
+async def get_all_users(current_user: User = Depends(get_current_user)):
+    """Admin endpoint to get all users for password management"""
+    if current_user.user_type != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    users = await db.users.find({}, {"hashed_password": 0}).to_list(1000)
+    return [User(**parse_from_mongo(user)) for user in users]
+
+@api_router.post("/admin/users/{user_id}/reset-password")
+async def admin_reset_user_password(
+    user_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Admin endpoint to reset user password and send new credentials"""
+    if current_user.user_type != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    # Find the target user
+    target_user = await db.users.find_one({"id": user_id})
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Generate new random password
+    import secrets
+    import string
+    new_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12))
+    
+    # Update password
+    hashed_new_password = get_password_hash(new_password)
+    await db.users.update_one(
+        {"id": user_id}, 
+        {"$set": {"hashed_password": hashed_new_password}}
+    )
+    
+    # Send new credentials
+    await send_password_reset_notification(
+        target_user["email"], 
+        target_user["username"], 
+        new_password,
+        current_user.username
+    )
+    
+    return {
+        "message": f"Password reset successfully for user {target_user['username']}",
+        "new_password": new_password,  # For admin reference
+        "notification_sent": True
+    }
+
+@api_router.get("/admin/email-logs")
+async def get_email_logs(current_user: User = Depends(get_current_user)):
+    """Get email logs for administrators to see sent credentials"""
+    if current_user.user_type != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    email_logs = await db.email_logs.find(
+        {"type": "manager_credentials"}, 
+        {"_id": 0}
+    ).sort("sent_at", -1).limit(50).to_list(50)
+    
+    return email_logs
+
+@api_router.get("/admin/manager-credentials/{manager_id}")
+async def get_manager_credentials(manager_id: str, current_user: User = Depends(get_current_user)):
+    """Get specific manager's login credentials for admin"""
+    if current_user.user_type != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    manager = await db.managers.find_one({"id": manager_id})
+    if not manager:
+        raise HTTPException(status_code=404, detail="Manager not found")
+    
+    # Find the latest email log for this manager
+    email_log = await db.email_logs.find_one(
+        {"recipient_email": manager["email"], "type": "manager_credentials"},
+        sort=[("sent_at", -1)]
+    )
+    
+    if not email_log:
+        raise HTTPException(status_code=404, detail="No credentials found for this manager")
+    
+    return {
+        "manager_name": manager["name"],
+        "email": email_log["credentials"]["email"],
+        "password": email_log["credentials"]["password"],
+        "sent_at": email_log["sent_at"],
+        "login_url": "https://music-tracker-6.preview.emergentagent.com"
+    }
+
+@api_router.put("/profile")
+async def update_profile(
+    username: Optional[str] = Form(None),
+    phone: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user)
+):
+    update_data = {}
+    
+    if username:
+        update_data["username"] = username
+    
+    # Update user record
+    if update_data:
+        await db.users.update_one({"id": current_user.id}, {"$set": update_data})
+    
+    # If user is a manager, also update manager record
+    if current_user.user_type == "manager" and current_user.manager_id:
+        manager_update = {}
+        if username:
+            manager_update["name"] = username
+        if phone:
+            manager_update["phone"] = phone
+        
+        if manager_update:
+            await db.managers.update_one(
+                {"id": current_user.manager_id}, 
+                {"$set": manager_update}
+            )
+    
+    return {"message": "Profile updated successfully"}
+
+@api_router.post("/tracks", response_model=MusicTrack)
+async def create_track(
+    unique_code: Optional[str] = Form(None),
+    rights_type: str = Form(...),
+    track_category: Optional[str] = Form(None),
+    rights_details: Optional[str] = Form(None),
+    title: str = Form(...),
+    music_composer: str = Form(...),
+    lyricist: str = Form(...),
+    singer_name: str = Form(...),
+    tempo: Optional[str] = Form(None),
+    scale: Optional[str] = Form(None),
+    audio_language: str = Form(...),
+    release_date: Optional[str] = Form(None),
+    album_name: Optional[str] = Form(None),
+    other_info: Optional[str] = Form(None),
+    managed_by: Optional[str] = Form(None),
+    mp3_file: Optional[UploadFile] = File(None),
+    lyrics_file: Optional[UploadFile] = File(None),
+    session_file: Optional[UploadFile] = File(None),
+    singer_agreement_file: Optional[UploadFile] = File(None),
+    music_director_agreement_file: Optional[UploadFile] = File(None),
+    current_user: User = Depends(get_current_user)
+):
+    # Validate rights type and track category
+    if rights_type not in ["original", "multi_rights"]:
+        raise HTTPException(status_code=400, detail="Rights type must be 'original' or 'multi_rights'")
+    
+    if rights_type == "original" and track_category not in ["cover_song", "original_composition"]:
+        raise HTTPException(status_code=400, detail="For original tracks, track category must be 'cover_song' or 'original_composition'")
+    
+    if rights_type == "multi_rights" and track_category is not None:
+        raise HTTPException(status_code=400, detail="Track category should not be specified for multi_rights tracks")
+    
+    # Validate rights details
+    if rights_details is not None and rights_details not in ["multi_rights", "own_rights"]:
+        raise HTTPException(status_code=400, detail="Rights details must be 'multi_rights' or 'own_rights'")
+    
+    # Auto-generate unique code if not provided
+    if not unique_code:
+        # Generate language code (first 3 letters)
+        language_code = audio_language[:3].upper() if audio_language else "UNK"
+        
+        # Determine prefix based on rights type and category
+        if rights_type == "original":
+            if track_category == "cover_song":
+                code_prefix = "OCC"
+            elif track_category == "original_composition":
+                code_prefix = "OCW"
+            else:
+                code_prefix = "OC"
+        else:  # multi_rights
+            code_prefix = "MR"
+        
+        # Find the next available number for this language-prefix combination
+        full_prefix = f"{language_code}-{code_prefix}"
+        regex_pattern = f"^{language_code}-{code_prefix}\\d+$"
+        
+        last_track_with_code = await db.tracks.find_one(
+            {"unique_code": {"$regex": regex_pattern}},
+            sort=[("unique_code", -1)]
+        )
+        
+        if last_track_with_code and last_track_with_code.get("unique_code"):
+            try:
+                # Extract number from last unique code
+                last_code = last_track_with_code["unique_code"]
+                number_part = last_code[len(f"{language_code}-{code_prefix}"):]
+                last_number = int(number_part)
+                next_number = last_number + 1
+            except (ValueError, IndexError):
+                next_number = 1
+        else:
+            next_number = 1
+        
+        # Generate the unique code
+        unique_code = f"{language_code}-{code_prefix}{next_number:04d}"
+        
+        # Double check this code doesn't exist
+        existing_track = await db.tracks.find_one({"unique_code": unique_code})
+        if existing_track:
+            next_number += 1
+            unique_code = f"{language_code}-{code_prefix}{next_number:04d}"
+    
+    # Generate serial number based on rights type
+    prefix = "OC" if rights_type == "original" else "MR"
+    
+    # Get the next serial number for this prefix
+    last_track = await db.tracks.find_one(
+        {"serial_number": {"$regex": f"^{prefix}"}},
+        sort=[("serial_number", -1)]
+    )
+    
+    if last_track and last_track.get("serial_number"):
+        # Extract number from last serial number
+        try:
+            last_number = int(last_track["serial_number"][2:])  # Remove prefix and convert to int
+            next_number = last_number + 1
+        except (ValueError, IndexError):
+            next_number = 1
+    else:
+        next_number = 1
+    
+    serial_number = f"{prefix}{next_number:04d}"  # Format as OC0001, MR0001, etc.
+    
+    # Validate file sizes (500MB limit)
+    max_size = 500 * 1024 * 1024  # 500MB in bytes
+    
+    mp3_file_path = None
+    lyrics_file_path = None
+    session_file_path = None
+    singer_agreement_file_path = None
+    music_director_agreement_file_path = None
+    mp3_filename = None
+    lyrics_filename = None
+    session_filename = None
+    singer_agreement_filename = None
+    music_director_agreement_filename = None
+    
+    if mp3_file:
+        if mp3_file.size > max_size:
+            raise HTTPException(status_code=413, detail="MP3 file too large. Maximum size is 500MB.")
+        
+        # Save MP3 file
+        file_extension = Path(mp3_file.filename).suffix
+        mp3_filename = f"{uuid.uuid4()}{file_extension}"
+        mp3_file_path = UPLOADS_DIR / mp3_filename
+        
+        async with aiofiles.open(mp3_file_path, 'wb') as f:
+            content = await mp3_file.read()
+            await f.write(content)
+    
+    if lyrics_file:
+        if lyrics_file.size > max_size:
+            raise HTTPException(status_code=413, detail="Lyrics file too large. Maximum size is 500MB.")
+        
+        # Save lyrics file
+        file_extension = Path(lyrics_file.filename).suffix
+        lyrics_filename = f"{uuid.uuid4()}{file_extension}"
+        lyrics_file_path = UPLOADS_DIR / lyrics_filename
+        
+        async with aiofiles.open(lyrics_file_path, 'wb') as f:
+            content = await lyrics_file.read()
+            await f.write(content)
+    
+    if session_file:
+        if session_file.size > max_size:
+            raise HTTPException(status_code=413, detail="Session file too large. Maximum size is 500MB.")
+        
+        # Save session file
+        file_extension = Path(session_file.filename).suffix
+        session_filename = f"{uuid.uuid4()}{file_extension}"
+        session_file_path = UPLOADS_DIR / session_filename
+        
+        async with aiofiles.open(session_file_path, 'wb') as f:
+            content = await session_file.read()
+            await f.write(content)
+    
+    if singer_agreement_file:
+        if singer_agreement_file.size > max_size:
+            raise HTTPException(status_code=413, detail="Singer agreement file too large. Maximum size is 500MB.")
+        
+        # Save singer agreement file
+        file_extension = Path(singer_agreement_file.filename).suffix
+        singer_agreement_filename = f"{uuid.uuid4()}{file_extension}"
+        singer_agreement_file_path = UPLOADS_DIR / singer_agreement_filename
+        
+        async with aiofiles.open(singer_agreement_file_path, 'wb') as f:
+            content = await singer_agreement_file.read()
+            await f.write(content)
+    
+    if music_director_agreement_file:
+        if music_director_agreement_file.size > max_size:
+            raise HTTPException(status_code=413, detail="Music director agreement file too large. Maximum size is 500MB.")
+        
+        # Save music director agreement file
+        file_extension = Path(music_director_agreement_file.filename).suffix
+        music_director_agreement_filename = f"{uuid.uuid4()}{file_extension}"
+        music_director_agreement_file_path = UPLOADS_DIR / music_director_agreement_filename
+        
+        async with aiofiles.open(music_director_agreement_file_path, 'wb') as f:
+            content = await music_director_agreement_file.read()
+            await f.write(content)
+    
+    # For managers, validate that they're uploading in their assigned language
+    if current_user.user_type == "manager" and current_user.manager_id:
+        manager_record = await db.managers.find_one({"id": current_user.manager_id})
+        if manager_record and manager_record.get("assigned_language"):
+            assigned_language = manager_record["assigned_language"]
+            if audio_language != assigned_language:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"You can only upload tracks in your assigned language: {assigned_language}"
+                )
+        # Auto-set managed_by for manager uploads
+        managed_by = current_user.manager_id
+
+    # Create track
+    track = MusicTrack(
+        unique_code=unique_code,
+        rights_type=rights_type,
+        track_category=track_category,
+        rights_details=rights_details,
+        serial_number=serial_number,
+        title=title,
+        music_composer=music_composer,
+        lyricist=lyricist,
+        singer_name=singer_name,
+        tempo=tempo,
+        scale=scale,
+        audio_language=audio_language,
+        release_date=release_date,
+        album_name=album_name,
+        other_info=other_info,
+        mp3_file_path=str(mp3_file_path) if mp3_file_path else None,
+        lyrics_file_path=str(lyrics_file_path) if lyrics_file_path else None,
+        session_file_path=str(session_file_path) if session_file_path else None,
+        singer_agreement_file_path=str(singer_agreement_file_path) if singer_agreement_file_path else None,
+        music_director_agreement_file_path=str(music_director_agreement_file_path) if music_director_agreement_file_path else None,
+        mp3_filename=mp3_filename,
+        lyrics_filename=lyrics_filename,
+        session_filename=session_filename,
+        singer_agreement_filename=singer_agreement_filename,
+        music_director_agreement_filename=music_director_agreement_filename,
+        created_by=current_user.id,
+        managed_by=managed_by
+    )
+    
+    track_dict = prepare_for_mongo(track.dict())
+    await db.tracks.insert_one(track_dict)
+    
+    return track
+
+@api_router.get("/tracks", response_model=List[MusicTrack])
+async def get_tracks(
+    search: Optional[str] = None,
+    composer: Optional[str] = None,
+    singer: Optional[str] = None,
+    album: Optional[str] = None,
+    language: Optional[str] = None,
+    current_user: User = Depends(get_current_user)
+):
+    query = {}
+    
+    # Role-based filtering: Managers can only see their own tracks
+    if current_user.user_type == "manager":
+        query["$or"] = [
+            {"created_by": current_user.id},  # Tracks created by this manager
+            {"managed_by": current_user.manager_id}  # Tracks assigned to this manager
+        ]
+    # Admins can see all tracks (no additional filter)
+    
+    if search:
+        search_filter = {
+            "$or": [
+                {"unique_code": {"$regex": search, "$options": "i"}},
+                {"title": {"$regex": search, "$options": "i"}},
+                {"music_composer": {"$regex": search, "$options": "i"}},
+                {"singer_name": {"$regex": search, "$options": "i"}},
+                {"album_name": {"$regex": search, "$options": "i"}}
+            ]
+        }
+        if "$or" in query:
+            # Combine role filter with search filter
+            query = {"$and": [query, search_filter]}
+        else:
+            query.update(search_filter)
+    
+    if composer:
+        query["music_composer"] = {"$regex": composer, "$options": "i"}
+    
+    if singer:
+        query["singer_name"] = {"$regex": singer, "$options": "i"}
+    
+    if album:
+        query["album_name"] = {"$regex": album, "$options": "i"}
+    
+    if language:
+        query["audio_language"] = {"$regex": language, "$options": "i"}
+    
+    tracks = await db.tracks.find(query).to_list(1000)
+    return [MusicTrack(**parse_from_mongo(track)) for track in tracks]
+
+@api_router.get("/tracks/{track_id}", response_model=MusicTrack)
+async def get_track(track_id: str, current_user: User = Depends(get_current_user)):
+    track = await db.tracks.find_one({"id": track_id})
+    if not track:
+        raise HTTPException(status_code=404, detail="Track not found")
+    return MusicTrack(**parse_from_mongo(track))
+
+@api_router.get("/tracks/next-code/{full_prefix}")
+async def get_next_unique_code(full_prefix: str, current_user: User = Depends(get_current_user)):
+    """Generate the next available unique code for the given language-prefix combination"""
+    
+    # Parse the full prefix (e.g., "ENG-MR", "TEL-OCC", "HIN-OCW")
+    if '-' not in full_prefix:
+        raise HTTPException(status_code=400, detail="Invalid format. Expected format: LANG-PREFIX (e.g., ENG-MR)")
+    
+    parts = full_prefix.split('-', 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail="Invalid format. Expected format: LANG-PREFIX (e.g., ENG-MR)")
+    
+    language_code, prefix = parts
+    
+    # Validate language code (3 letters)
+    if len(language_code) != 3 or not language_code.isalpha():
+        raise HTTPException(status_code=400, detail="Language code must be 3 letters (e.g., ENG, TEL, HIN)")
+    
+    # Validate prefix
+    valid_prefixes = ['OC', 'OCC', 'OCW', 'MR']
+    if prefix not in valid_prefixes:
+        raise HTTPException(status_code=400, detail=f"Invalid prefix. Must be one of: {valid_prefixes}")
+    
+    # Find the highest existing code with this full prefix (language + rights prefix)
+    regex_pattern = f"^{language_code}-{prefix}\\d+$"
+    last_track = await db.tracks.find_one(
+        {"unique_code": {"$regex": regex_pattern}},
+        sort=[("unique_code", -1)]
+    )
+    
+    if last_track and last_track.get("unique_code"):
+        # Extract number from last unique code
+        try:
+            last_code = last_track["unique_code"]
+            # Remove language-prefix part and convert to int (e.g., "ENG-MR0003" -> "0003" -> 3)
+            number_part = last_code[len(f"{language_code}-{prefix}"):]
+            last_number = int(number_part)
+            next_number = last_number + 1
+        except (ValueError, IndexError):
+            next_number = 1
+    else:
+        next_number = 1
+    
+    # Format the unique code with leading zeros (4 digits)
+    unique_code = f"{language_code}-{prefix}{next_number:04d}"
+    
+    # Double check this code doesn't exist (in case of race conditions)
+    existing_track = await db.tracks.find_one({"unique_code": unique_code})
+    if existing_track:
+        # If exists, try next number
+        next_number += 1
+        unique_code = f"{language_code}-{prefix}{next_number:04d}"
+    
+    return {"unique_code": unique_code}
+
+@api_router.put("/tracks/{track_id}", response_model=MusicTrack)
+async def update_track(
+    track_id: str,
+    track_update: MusicTrackUpdate,
+    current_user: User = Depends(get_current_user)
+):
+    track = await db.tracks.find_one({"id": track_id})
+    if not track:
+        raise HTTPException(status_code=404, detail="Track not found")
+    
+    # Authorization: Admins can edit any track, Managers can only edit their own tracks
+    if current_user.user_type == "manager":
+        if track["created_by"] != current_user.id and track.get("managed_by") != current_user.manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized to update this track")
+    # Admins can edit any track (no additional check needed)
+    
+    update_data = {k: v for k, v in track_update.dict().items() if v is not None}
+    
+    if update_data:
+        await db.tracks.update_one({"id": track_id}, {"$set": update_data})
+    
+    updated_track = await db.tracks.find_one({"id": track_id})
+    return MusicTrack(**parse_from_mongo(updated_track))
+
+@api_router.delete("/tracks/{track_id}")
+async def delete_track(track_id: str, current_user: User = Depends(get_current_user)):
+    track = await db.tracks.find_one({"id": track_id})
+    if not track:
+        raise HTTPException(status_code=404, detail="Track not found")
+    
+    # Authorization: Admins can delete any track, Managers can only delete their own tracks
+    if current_user.user_type == "manager":
+        if track["created_by"] != current_user.id and track.get("managed_by") != current_user.manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this track")
+    # Admins can delete any track (no additional check needed)
+    
+    # Delete files
+    if track.get("mp3_file_path") and Path(track["mp3_file_path"]).exists():
+        Path(track["mp3_file_path"]).unlink()
+    
+    if track.get("lyrics_file_path") and Path(track["lyrics_file_path"]).exists():
+        Path(track["lyrics_file_path"]).unlink()
+    
+    if track.get("session_file_path") and Path(track["session_file_path"]).exists():
+        Path(track["session_file_path"]).unlink()
+    
+    if track.get("singer_agreement_file_path") and Path(track["singer_agreement_file_path"]).exists():
+        Path(track["singer_agreement_file_path"]).unlink()
+    
+    if track.get("music_director_agreement_file_path") and Path(track["music_director_agreement_file_path"]).exists():
+        Path(track["music_director_agreement_file_path"]).unlink()
+    
+    await db.tracks.delete_one({"id": track_id})
+    return {"message": "Track deleted successfully"}
+
+@api_router.get("/tracks/bulk-upload/template")
+async def download_bulk_upload_template(current_user: User = Depends(get_current_user)):
+    """Download Excel template for bulk upload"""
+    try:
+        logger.info(f"Template download requested by user: {current_user.email}")
+        wb = generate_excel_template()
+        
+        # Save to bytes
+        excel_buffer = io.BytesIO()
+        wb.save(excel_buffer)
+        excel_buffer.seek(0)
+        
+        content = excel_buffer.getvalue()
+        logger.info(f"Template generated successfully, size: {len(content)} bytes")
+        
+        return Response(
+            content,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=bulk_tracks_template.xlsx"}
+        )
+    except Exception as e:
+        logger.error(f"Error generating template: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to generate template: {str(e)}")
+
+@api_router.post("/tracks/bulk-upload", response_model=BulkUploadResponse)
+async def bulk_upload_tracks(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    """Bulk upload tracks from Excel file"""
+    if not file.filename.lower().endswith(('.xlsx', '.xls')):
+        raise HTTPException(status_code=400, detail="File must be an Excel file (.xlsx or .xls)")
+    
+    try:
+        # Read Excel file
+        contents = await file.read()
+        
+        # Create a temporary file to read with pandas
+        excel_buffer = io.BytesIO(contents)
+        df = pd.read_excel(excel_buffer, sheet_name=0)  # Read first sheet
+        
+        successful_count = 0
+        failed_count = 0
+        errors = []
+        successful_tracks = []
+        
+        # Process each row
+        for index, row in df.iterrows():
+            row_number = index + 2  # +2 because pandas is 0-indexed and Excel header is row 1
+            
+            # Skip empty rows
+            if row.isna().all():
+                continue
+            
+            try:
+                track_id, error = await process_bulk_upload_row(row.to_dict(), row_number, current_user)
+                
+                if error:
+                    failed_count += 1
+                    errors.append({
+                        "row": row_number,
+                        "error": error
+                    })
+                else:
+                    successful_count += 1
+                    successful_tracks.append(track_id)
+                    
+            except Exception as e:
+                failed_count += 1
+                errors.append({
+                    "row": row_number,
+                    "error": f"Unexpected error: {str(e)}"
+                })
+        
+        return BulkUploadResponse(
+            successful_count=successful_count,
+            failed_count=failed_count,
+            errors=errors,
+            successful_tracks=successful_tracks
+        )
+        
+    except Exception as e:
+        logger.error(f"Bulk upload error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to process Excel file: {str(e)}")
+
+@api_router.get("/tracks/{track_id}/lyrics-content")
+async def get_lyrics_content(
+    track_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    track = await db.tracks.find_one({"id": track_id})
+    if not track:
+        raise HTTPException(status_code=404, detail="Track not found")
+    
+    lyrics_file_path = track.get("lyrics_file_path")
+    if not lyrics_file_path or not Path(lyrics_file_path).exists():
+        raise HTTPException(status_code=404, detail="Lyrics file not found")
+    
+    try:
+        # Read the lyrics file content
+        async with aiofiles.open(lyrics_file_path, 'r', encoding='utf-8') as f:
+            content = await f.read()
+        return {"content": content, "filename": track.get("lyrics_filename", "lyrics.txt")}
+    except Exception as e:
+        # Try reading with different encoding if utf-8 fails
+        try:
+            async with aiofiles.open(lyrics_file_path, 'r', encoding='latin1') as f:
+                content = await f.read()
+            return {"content": content, "filename": track.get("lyrics_filename", "lyrics.txt")}
+        except:
+            raise HTTPException(status_code=500, detail="Could not read lyrics file")
+
+@api_router.get("/tracks/{track_id}/download/{file_type}")
+async def download_file(
+    track_id: str,
+    file_type: str,  # 'mp3', 'lyrics', 'session', 'singer_agreement', 'music_director_agreement'
+    current_user: User = Depends(get_current_user)
+):
+    track = await db.tracks.find_one({"id": track_id})
+    if not track:
+        raise HTTPException(status_code=404, detail="Track not found")
+    
+    if file_type == "mp3":
+        file_path = track.get("mp3_file_path")
+        filename = track.get("mp3_filename", "audio.mp3")
+    elif file_type == "lyrics":
+        file_path = track.get("lyrics_file_path")
+        filename = track.get("lyrics_filename", "lyrics.txt")
+    elif file_type == "session":
+        file_path = track.get("session_file_path")
+        filename = track.get("session_filename", "session_file")
+    elif file_type == "singer_agreement":
+        file_path = track.get("singer_agreement_file_path")
+        filename = track.get("singer_agreement_filename", "singer_agreement.pdf")
+    elif file_type == "music_director_agreement":
+        file_path = track.get("music_director_agreement_file_path")
+        filename = track.get("music_director_agreement_filename", "music_director_agreement.pdf")
+    else:
+        raise HTTPException(status_code=400, detail="Invalid file type")
+    
+    if not file_path or not Path(file_path).exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return FileResponse(
+        path=file_path,
+        filename=f"{track['unique_code']}_{track['title']}_{filename}",
+        media_type='application/octet-stream'
+    )
+
+# Include the router in the main app
+app.include_router(api_router)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"]
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close()

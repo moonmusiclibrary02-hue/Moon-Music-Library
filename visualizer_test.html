@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Audio Visualizer Test</title>
+    <style>
+        body { margin: 20px; font-family: Arial, sans-serif; background: #1a1a1a; color: white; }
+        canvas { border: 1px solid #333; background: #000; margin: 10px 0; }
+        audio { width: 100%; margin: 10px 0; }
+        button { margin: 5px; padding: 10px; }
+        .debug { background: #333; padding: 10px; margin: 10px 0; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <h1>Audio Visualizer Test</h1>
+    <audio id="audio" controls crossorigin="anonymous">
+        <source src="https://music-tracker-6.preview.emergentagent.com/api/files/e17addd0-3a85-4dcd-a354-42f25bcf404c.wav" type="audio/wav">
+    </audio>
+    <br>
+    <button onclick="initVisualizer()">Initialize Visualizer</button>
+    <button onclick="toggleVisualization()">Toggle Visualization</button>
+    <div class="debug" id="debug">Debug info will appear here...</div>
+    <canvas id="canvas" width="800" height="200"></canvas>
+
+    <script>
+        let audioContext, analyser, source, animationId;
+        let isVisualizationActive = false;
+        const audio = document.getElementById('audio');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const debugDiv = document.getElementById('debug');
+
+        function log(message) {
+            console.log(message);
+            debugDiv.innerHTML += message + '<br>';
+            debugDiv.scrollTop = debugDiv.scrollHeight;
+        }
+
+        async function initVisualizer() {
+            try {
+                log('Initializing Web Audio API...');
+                
+                if (!window.AudioContext && !window.webkitAudioContext) {
+                    log('ERROR: Web Audio API not supported');
+                    return;
+                }
+
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                log('AudioContext created: ' + audioContext.state);
+
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                    log('AudioContext resumed: ' + audioContext.state);
+                }
+
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                analyser.smoothingTimeConstant = 0.8;
+                log('Analyser created with fftSize: ' + analyser.fftSize);
+
+                if (!source) {
+                    source = audioContext.createMediaElementSource(audio);
+                    source.connect(analyser);
+                    analyser.connect(audioContext.destination);
+                    log('Audio source connected');
+                }
+
+                log('Visualizer initialized successfully!');
+                
+                // Auto-start visualization when audio plays
+                audio.addEventListener('play', () => {
+                    log('Audio started playing');
+                    startVisualization();
+                });
+                
+                audio.addEventListener('pause', () => {
+                    log('Audio paused');
+                    stopVisualization();
+                });
+
+            } catch (error) {
+                log('ERROR initializing visualizer: ' + error.message);
+            }
+        }
+
+        function startVisualization() {
+            if (isVisualizationActive) return;
+            isVisualizationActive = true;
+            log('Starting visualization...');
+            animate();
+        }
+
+        function stopVisualization() {
+            isVisualizationActive = false;
+            if (animationId) {
+                cancelAnimationFrame(animationId);
+            }
+            log('Visualization stopped');
+        }
+
+        function toggleVisualization() {
+            if (isVisualizationActive) {
+                stopVisualization();
+            } else {
+                startVisualization();
+            }
+        }
+
+        function animate() {
+            if (!isVisualizationActive || !analyser) return;
+
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            analyser.getByteFrequencyData(dataArray);
+
+            // Clear canvas
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw frequency bars
+            const barWidth = canvas.width / bufferLength * 2.5;
+            let x = 0;
+
+            for (let i = 0; i < bufferLength; i++) {
+                const barHeight = (dataArray[i] / 255) * canvas.height * 0.8;
+                
+                const gradient = ctx.createLinearGradient(0, canvas.height, 0, canvas.height - barHeight);
+                gradient.addColorStop(0, '#f97316');
+                gradient.addColorStop(0.5, '#fb923c');
+                gradient.addColorStop(1, '#fed7aa');
+
+                ctx.fillStyle = gradient;
+                ctx.fillRect(x, canvas.height - barHeight, barWidth - 2, barHeight);
+                x += barWidth;
+            }
+
+            animationId = requestAnimationFrame(animate);
+        }
+
+        // Initialize on page load
+        window.addEventListener('load', () => {
+            log('Page loaded - ready to test visualizer');
+        });
+    </script>
+</body>
+</html>
