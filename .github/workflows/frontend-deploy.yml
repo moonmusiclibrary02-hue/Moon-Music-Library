@@ -7,9 +7,10 @@ name: Deploy Frontend to Cloud Run
 on:
   push:
     branches: [ "main" ]
-  paths:
-    - 'frontend/**'
-    - '.github/workflows/frontend-deploy.yml'
+    # CORRECTED: 'paths' is now correctly indented under 'push'.
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-deploy.yml'
 
 jobs:
   deploy:
@@ -17,7 +18,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Standard steps to check out code and authenticate to Google Cloud.
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -31,23 +31,18 @@ jobs:
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
 
-      # Build the frontend Docker image and push it to Google Artifact Registry.
       - name: Build and Push Docker Image
         run: |-
-          gcloud auth configure-docker gcr.io
+          gcloud auth configure-docker gcr.io --quiet
           docker build -t gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-frontend-image:latest ./frontend
           docker push gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-frontend-image:latest
 
-      # Deploy the new image to Cloud Run. This is where we inject the
-      # backend's public URL as an environment variable into the frontend container.
       - name: Deploy to Cloud Run with Backend URL
         uses: google-github-actions/deploy-run@v2
         with:
           service: music-frontend-service
           region: us-central1
           image: gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-frontend-image:latest
-          env-vars:
-            # This makes the backend's URL available to our 'entrypoint.sh' script
-            # inside the running container.
-            - name: BACKEND_URL
-              value: ${{ secrets.BACKEND_URL }}
+          # CORRECTED: 'env-vars' is now a multiline string (using |-), which is the correct format for this action.
+          env-vars: |-
+            BACKEND_URL=${{ secrets.BACKEND_URL }}
