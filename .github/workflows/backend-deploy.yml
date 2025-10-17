@@ -1,63 +1,50 @@
-# This is the CI/CD pipeline for your Python backend. 
+# This is the CI/CD pipeline for your Python backend.
 # It automatically builds and deploys the backend to Google Cloud Run
 # whenever you push changes to the 'backend' folder on the 'main' branch.
 
 name: Deploy Backend to Cloud Run
 
 on:
-  # This workflow is triggered on a push event to the 'main' branch.
   push:
     branches: [ "main" ]
-  # It will ONLY run if changes are detected in the 'backend' folder
-  # or if this workflow file itself is modified.
-  paths:
-    - 'backend/**'
-    - '.github/workflows/backend-deploy.yml'
+    # CORRECTED: 'paths' is now correctly indented under 'push'.
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-deploy.yml'
 
 jobs:
   deploy:
     name: Build and Deploy Backend
-    # Use a standard Linux virtual machine provided by GitHub to run the job.
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Check out your repository code so the runner can access it.
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Step 2: Authenticate to Google Cloud using the service account key stored in GitHub secrets.
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: '${{ secrets.GCP_SA_KEY }}'
 
-      # Step 3: Set up the gcloud command-line tool in the runner environment.
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
 
-      # Step 4: Build the Docker image and push it to Google Artifact Registry.
       - name: Build and Push Docker Image
         run: |-
-          gcloud auth configure-docker gcr.io
+          gcloud auth configure-docker gcr.io --quiet
           docker build -t gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-backend-image:latest ./backend
           docker push gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-backend-image:latest
 
-      # Step 5: Deploy the new image to Cloud Run. This is the crucial step where we
-      #          securely inject the secrets from Google Secret Manager as environment variables.
       - name: Deploy to Cloud Run with Secrets
         uses: google-github-actions/deploy-run@v2
         with:
           service: music-backend-service
           region: us-central1
           image: gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-backend-image:latest
-          secrets:
-            # This maps the Cloud Run environment variable (e.g., MONGO_URL)
-            # to the secret stored in Google Secret Manager.
-            - name: MONGO_URL
-              value: projects/${{ secrets.GCP_PROJECT_ID }}/secrets/MONGO_URL/versions/latest
-            - name: DB_NAME
-              value: projects/${{ secrets.GCP_PROJECT_ID }}/secrets/DB_NAME/versions/latest
-            - name: SECRET_KEY
-              value: projects/${{ secrets.GCP_PROJECT_ID }}/secrets/SECRET_KEY/versions/latest
+          # CORRECTED: 'secrets' is now a multiline string (using |-), which is the correct format for this action.
+          secrets: |-
+            MONGO_URL=projects/${{ secrets.GCP_PROJECT_ID }}/secrets/MONGO_URL:latest
+            DB_NAME=projects/${{ secrets.GCP_PROJECT_ID }}/secrets/DB_NAME:latest
+            SECRET_KEY=projects/${{ secrets.GCP_PROJECT_ID }}/secrets/SECRET_KEY:latest
