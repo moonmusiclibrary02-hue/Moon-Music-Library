@@ -1,13 +1,8 @@
-# This is the CI/CD pipeline for your React frontend.
-# It automatically builds and deploys the frontend to Google Cloud Run
-# whenever you push changes to the 'frontend' folder on the 'main' branch.
-
 name: Deploy Frontend to Cloud Run
 
 on:
   push:
     branches: [ "main" ]
-    # CORRECTED: 'paths' is now correctly indented under 'push'.
     paths:
       - 'frontend/**'
       - '.github/workflows/frontend-deploy.yml'
@@ -21,15 +16,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # CORRECTED: Pinned to a specific commit hash for v2
       - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: '${{ secrets.GCP_SA_KEY }}'
+        uses: google-github-actions/auth@d8813a34a87713203f16b2513364f77c3886b6ac # Pinned to v2.1.2
 
+      # CORRECTED: Pinned to a specific commit hash for v2
       - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
+        uses: google-github-actions/setup-gcloud@d682054a72d242167ecf45c7d2427f71f8450c25 # Pinned to v2.1.0
 
       - name: Build and Push Docker Image
         run: |-
@@ -37,12 +30,12 @@ jobs:
           docker build -t gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-frontend-image:latest ./frontend
           docker push gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-frontend-image:latest
 
+      # CORRECTED: Pinned to a specific commit hash for v2
       - name: Deploy to Cloud Run with Backend URL
-        uses: google-github-actions/deploy-run@v2
+        uses: google-github-actions/deploy-run@a50c39f15538e1e32d1f705b1c55b682b13c1f23 # Pinned to v2.0.0
         with:
           service: music-frontend-service
           region: us-central1
           image: gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-frontend-image:latest
-          # CORRECTED: 'env-vars' is now a multiline string (using |-), which is the correct format for this action.
           env-vars: |-
             BACKEND_URL=${{ secrets.BACKEND_URL }}
