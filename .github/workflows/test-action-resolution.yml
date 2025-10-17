@@ -1,0 +1,18 @@
+# .github/workflows/test-action-resolution.yml
+
+name: Test Google Action Resolution
+
+on:
+  # This allows us to trigger it manually
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Try to resolve Google Action
+    runs-on: ubuntu-latest
+    steps:
+      - name: This step will fail if the action cannot be found
+        uses: google-github-actions/deploy-run@v2
+        with:
+          service: test
+          region: us-central1
