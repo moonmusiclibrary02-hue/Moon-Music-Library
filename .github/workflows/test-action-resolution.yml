@@ -1,18 +1,21 @@
-# .github/workflows/test-action-resolution.yml
+# .github/workflows/test-runner.yml
 
-name: Test Google Action Resolution
+name: Test Basic Runner Functionality
 
 on:
-  # This allows us to trigger it manually
+  # This allows us to trigger it manually from the Actions tab.
   workflow_dispatch:
 
 jobs:
-  test:
-    name: Try to resolve Google Action
+  hello_world_job:
+    name: A simple job to test the runner
     runs-on: ubuntu-latest
     steps:
-      - name: This step will fail if the action cannot be found
-        uses: google-github-actions/deploy-run@v2
-        with:
-          service: test
-          region: us-central1
+      # Step 1: Use the most standard action available, actions/checkout.
+      # If this step fails, nothing can work.
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      # Step 2: Run a simple command.
+      - name: Say hello
+        run: echo "Hello, world! This is a basic test."
