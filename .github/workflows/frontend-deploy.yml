@@ -1,3 +1,5 @@
+# .github/workflows/frontend-deploy.yml
+
 name: Deploy Frontend to Cloud Run
 
 on:
@@ -12,6 +14,7 @@ jobs:
     name: Build and Deploy Frontend
     runs-on: ubuntu-latest
 
+    # Add permissions for Workload Identity Federation
     permissions:
       contents: 'read'
       id-token: 'write'
@@ -20,25 +23,27 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # --- CORRECTED AUTHENTICATION STEP ---
       - name: Authenticate to Google Cloud
         id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: 'projects/175236630501/locations/global/workloadIdentityPools/moon-music-wif-pool/providers/github-provider'
-          # Use double quotes to ensure the secret is expanded correctly
+          # Using double quotes to ensure the secret is expanded
           service_account: "github-actions-deployer@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com"
 
-      # This step is simplified as it inherits credentials from the auth step
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Build and Push Docker Image
+      - name: Build and Push Docker Image to Artifact Registry
         run: |-
-          # The auth step configures the gcloud credential helper for Docker automatically
-          gcloud auth configure-docker gcr.io --quiet
-          docker build -t gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-frontend-image:latest ./frontend
-          docker push gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-frontend-image:latest
+          # Enable Docker authentication for Artifact Registry
+          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+          
+          # Build and tag the image with the full Artifact Registry path
+          docker build -t us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/gcr.io/music-frontend-image:latest ./frontend
+          
+          # Push the image
+          docker push us-central1-docker.pkg.dev/${{ secrets.GP_PROJECT_ID }}/gcr.io/music-frontend-image:latest
 
       - name: Deploy to Cloud Run
         id: deploy
@@ -46,6 +51,7 @@ jobs:
         with:
           service: music-frontend-service
           region: us-central1
-          image: gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-frontend-image:latest
+          # Point to the image in Artifact Registry
+          image: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/gcr.io/music-frontend-image:latest
           env_vars: |-
             BACKEND_URL=${{ secrets.BACKEND_URL }}
