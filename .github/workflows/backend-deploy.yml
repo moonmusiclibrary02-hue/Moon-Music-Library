@@ -41,7 +41,7 @@ jobs:
           docker push gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-backend-image:latest
 
       - name: Deploy to Cloud Run with Secrets
-        uses: google-github-actions/deploy
+        uses: google-github-actions/deploy@v2
         with:
           service: music-backend-service
           region: us-central1
