@@ -11,18 +11,28 @@ jobs:
   deploy:
     name: Build and Deploy Backend
     runs-on: ubuntu-latest
+    
+    # Add permissions for the keyless authentication to work
+    permissions:
+      contents: 'read'
+      id-token: 'write'
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # CORRECTED: Pinned to a specific commit hash for v2
+      # --- THIS IS THE UPDATED STEP ---
       - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@d8813a34a87713203f16b2513364f77c3886b6ac # Pinned to v2.1.2
+        uses: google-github-actions/auth@v2
+        with:
+          # Replace <YOUR_PROJECT_NUMBER> with your actual project number
+          workload_identity_provider: 'projects/175236630501/locations/global/workloadIdentityPools/moon-music-wif-pool/providers/github-provider'
+          service_account: 'github-actions-deployer@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com'
 
-      # CORRECTED: Pinned to a specific commit hash for v2
       - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@d682054a72d242167ecf45c7d2427f71f8450c25 # Pinned to v2.1.0
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
       - name: Build and Push Docker Image
         run: |-
@@ -30,9 +40,8 @@ jobs:
           docker build -t gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-backend-image:latest ./backend
           docker push gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-backend-image:latest
 
-      # CORRECTED: Pinned to a specific commit hash for v2
       - name: Deploy to Cloud Run with Secrets
-        uses: google-github-actions/deploy-run@a50c39f15538e1e32d1f705b1c55b682b13c1f23 # Pinned to v2.0.0
+        uses: google-github-actions/deploy-run@v2
         with:
           service: music-backend-service
           region: us-central1
