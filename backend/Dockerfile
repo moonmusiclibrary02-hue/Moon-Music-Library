@@ -9,7 +9,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the application
-COPY .env . 
 COPY . .
 
 # Set the environment variable for the port
