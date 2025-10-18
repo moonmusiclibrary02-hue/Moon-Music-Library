@@ -11,8 +11,7 @@ jobs:
   deploy:
     name: Build and Deploy Backend
     runs-on: ubuntu-latest
-    
-    # Add permissions for the keyless authentication to work
+
     permissions:
       contents: 'read'
       id-token: 'write'
@@ -21,18 +20,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # --- THIS IS THE UPDATED STEP ---
+      # --- CORRECTED AUTHENTICATION STEP ---
       - name: Authenticate to Google Cloud
+        id: auth
         uses: google-github-actions/auth@v2
         with:
-          # Replace <YOUR_PROJECT_NUMBER> with your actual project number
           workload_identity_provider: 'projects/175236630501/locations/global/workloadIdentityPools/moon-music-wif-pool/providers/github-provider'
-          service_account: 'github-actions-deployer@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com'
+          # Use double quotes to ensure the secret is expanded correctly
+          service_account: "github-actions-deployer@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com"
 
+      # This step is simplified as it inherits credentials from the auth step
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
       - name: Build and Push Docker Image
         run: |-
@@ -40,13 +39,19 @@ jobs:
           docker build -t gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-backend-image:latest ./backend
           docker push gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-backend-image:latest
 
+      # --- SWITCHED TO THE DEDICATED CLOUD RUN DEPLOY ACTION ---
       - name: Deploy to Cloud Run with Secrets
+        id: deploy
         uses: google-github-actions/deploy-cloudrun@v2
         with:
           service: music-backend-service
           region: us-central1
           image: gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-backend-image:latest
+          # The secrets format is correct for this action
           secrets: |-
-            MONGO_URL=projects/${{ secrets.GCP_PROJECT_ID }}/secrets/MONGO_URL:latest
-            DB_NAME=projects/${{ secrets.GCP_PROJECT_ID }}/secrets/DB_NAME:latest
-            SECRET_KEY=projects/${{ secrets.GCP_PROJECT_ID }}/secrets/SECRET_KEY:latest
+            MONGO_URL=MONGO_URL:latest
+            DB_NAME=DB_NAME:latest
+            SECRET_KEY=SECRET_KEY:latest
+        # Note: When using the deploy-cloudrun action, you don't need the full resource path
+        # for secrets if they are in the same project. Just the secret name is sufficient.
+        # The full path also works fine.
