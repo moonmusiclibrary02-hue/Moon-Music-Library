@@ -1,23 +1,30 @@
+# frontend/Dockerfile
+
 # Stage 1: Build the React application
-FROM node:20 AS builder
+FROM node:18-alpine AS build
 WORKDIR /app
-COPY package.json yarn.lock ./
-RUN yarn install --frozen-lockfile
-COPY . .
+COPY package.json ./
+COPY package-lock.json ./
+RUN npm install
+COPY . ./
 RUN npm run build
 
-# Stage 2: Serve the files with NGINX and inject the environment variable
-FROM nginx:alpine
+# Stage 2: Serve the static files with a lightweight server
+FROM node:18-alpine
+WORKDIR /app
 
-# Copy the built assets
-COPY --from=builder /app/build /usr/share/nginx/html
+# Copy the build output from the build stage
+COPY --from=build /app/build ./build
+COPY package.json ./
+COPY package-lock.json ./
 
-# Copy the startup script
-COPY entrypoint.sh /
-RUN chmod +x /entrypoint.sh
+# Install only the production server dependency
+RUN npm install --omit=dev
 
-# The container will listen on port 8080 (NGINX will be configured by Cloud Run)
+# Expose the port that Cloud Run will use
+# This is for documentation; Cloud Run overrides this with the PORT env var
 EXPOSE 8080
 
-# Run the startup script
-CMD ["/entrypoint.sh"]
+# The command to start the application
+# This will run the "start": "serve -s build" script from package.json
+CMD [ "npm", "start" ]
