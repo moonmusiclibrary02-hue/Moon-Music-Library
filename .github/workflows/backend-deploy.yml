@@ -40,10 +40,10 @@ jobs:
           gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
           
           # Build and tag the image with the full Artifact Registry path
-          docker build -t us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/gcr.io/music-backend-image:latest ./backend
+          docker build -t us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/music-library-images/music-backend-image:latest ./backend
           
           # Push the image
-          docker push us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/gcr.io/music-backend-image:latest
+          docker push us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/music-library-images/music-backend-image:latest
 
       - name: Deploy to Cloud Run with Secrets
         id: deploy
@@ -52,7 +52,7 @@ jobs:
           service: music-backend-service
           region: us-central1
           # Point to the image in Artifact Registry
-          image: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/gcr.io/music-backend-image:latest
+          image: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/music-library-images/music-backend-image:latest
           # This format for secrets is correct for this action
           secrets: |-
             MONGO_URL=MONGO_URL:latest
