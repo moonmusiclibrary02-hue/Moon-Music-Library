@@ -43,7 +43,7 @@ jobs:
           docker build -t us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/gcr.io/music-frontend-image:latest ./frontend
           
           # Push the image
-          docker push us-central1-docker.pkg.dev/${{ secrets.GP_PROJECT_ID }}/gcr.io/music-frontend-image:latest
+          docker push us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/gcr.io/music-frontend-image:latest
 
       - name: Deploy to Cloud Run
         id: deploy
