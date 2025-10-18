@@ -1,6 +1,6 @@
 # .github/workflows/frontend-deploy.yml
 
-name: Deploy Frontend to Cloud Run
+name: Deploy Frontend to Cloud Run 
 
 on:
   push:
