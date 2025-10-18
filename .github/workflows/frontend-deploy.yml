@@ -12,7 +12,6 @@ jobs:
     name: Build and Deploy Frontend
     runs-on: ubuntu-latest
 
-    # Add permissions for the keyless authentication to work
     permissions:
       contents: 'read'
       id-token: 'write'
@@ -21,30 +20,32 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # --- THIS IS THE UPDATED STEP ---
+      # --- CORRECTED AUTHENTICATION STEP ---
       - name: Authenticate to Google Cloud
+        id: auth
         uses: google-github-actions/auth@v2
         with:
-          # Replace <YOUR_PROJECT_NUMBER> with your actual project number
           workload_identity_provider: 'projects/175236630501/locations/global/workloadIdentityPools/moon-music-wif-pool/providers/github-provider'
-          service_account: 'github-actions-deployer@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com'
+          # Use double quotes to ensure the secret is expanded correctly
+          service_account: "github-actions-deployer@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com"
 
+      # This step is simplified as it inherits credentials from the auth step
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ secrets.GCP_PROJECT_ID }}
 
       - name: Build and Push Docker Image
         run: |-
+          # The auth step configures the gcloud credential helper for Docker automatically
           gcloud auth configure-docker gcr.io --quiet
           docker build -t gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-frontend-image:latest ./frontend
           docker push gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-frontend-image:latest
 
-      - name: Deploy to Cloud Run with Backend URL
-        uses: google-github-actions/deploy@v2
+      - name: Deploy to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
         with:
           service: music-frontend-service
           region: us-central1
           image: gcr.io/${{ secrets.GCP_PROJECT_ID }}/music-frontend-image:latest
-          env-vars: |-
+          env_vars: |-
             BACKEND_URL=${{ secrets.BACKEND_URL }}
