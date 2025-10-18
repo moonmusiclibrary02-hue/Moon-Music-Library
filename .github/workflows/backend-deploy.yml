@@ -57,13 +57,4 @@ jobs:
           secrets: |-
             MONGO_URL=MONGO_URL:latest
             DB_NAME=DB_NAME:latest
-            SECRET_KEY=SECRET_KEY:latest```
-
-### Final Step
-
-Before you push these new files, please double-check that you have successfully run this command in your Cloud Shell to grant the necessary permission for Artifact Registry:
-
-```bash
-gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-  --member="serviceAccount:github-actions-deployer@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
-  --role="roles/artifactregistry.writer"
+            SECRET_KEY=SECRET_KEY:latest
