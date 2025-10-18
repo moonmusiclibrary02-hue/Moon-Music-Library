@@ -61,7 +61,7 @@
     "test": "craco test"
   },
   "overrides": {
-    "ajv": "6.12.6"
+    "ajv": "^6.12.6"
   },
   "browserslist": {
     "production": [
