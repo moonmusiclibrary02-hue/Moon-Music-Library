@@ -25,6 +25,7 @@ import io
 import urllib.request
 import re
 from urllib.parse import urlparse, parse_qs
+from google.cloud import storage
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv()
@@ -42,25 +43,20 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create uploads directory
-UPLOADS_DIR = Path("/app/uploads")
-UPLOADS_DIR.mkdir(exist_ok=True)
+# --- Google Cloud Storage (GCS) Connection ---
+# This environment variable will be injected from Secret Manager by our CI/CD pipeline.
+GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME')
+storage_client = storage.Client()
+
+# A quick check to ensure the GCS bucket name is configured on startup.
+if not GCS_BUCKET_NAME:
+    logger.error("FATAL: GCS_BUCKET_NAME environment variable is not set.")
+    # This helps in debugging deployment issues early.
 
 # Create the main app
 app = FastAPI(title="Music Production Inventory")
 
-# Mount static files under /api/files to ensure proper routing with CORS support
-class CORSStaticFiles(StaticFiles):
-    async def get_response(self, path: str, scope) -> Response:
-        response = await super().get_response(path, scope)
-        # Add CORS headers for audio files
-        if path.endswith(('.mp3', '.wav', '.ogg', '.m4a', '.flac')):
-            response.headers["Access-Control-Allow-Origin"] = "*"
-            response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "*"
-        return response
 
-app.mount("/api/files", CORSStaticFiles(directory="/app/uploads"), name="files")
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
@@ -562,6 +558,71 @@ def generate_excel_template():
             sheet.column_dimensions[column_letter].width = adjusted_width
     
     return wb
+
+# ADD THIS NEW HELPER FUNCTION
+async def upload_to_gcs(file: UploadFile, folder: str) -> str:
+    """
+    Uploads a file to a specified folder in the GCS bucket and returns its public URL.
+    """
+    if not GCS_BUCKET_NAME:
+        raise HTTPException(status_code=500, detail="GCS bucket name is not configured.")
+    
+    try:
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        
+        # Create a unique filename using a UUID to prevent collisions.
+        # Format: audio/123e4567-e89b-12d3-a456-426614174000_my-song.mp3
+        blob_name = f"{folder}/{uuid.uuid4()}_{file.filename}"
+        blob = bucket.blob(blob_name)
+        
+        # Get file content from the upload
+        content = await file.read()
+        
+        # Upload the content to GCS
+        # Using a threadpool for this synchronous operation is best practice in async code,
+        # but for simplicity, we call it directly. FastAPI handles this reasonably well.
+        blob.upload_from_string(content, content_type=file.content_type)
+        
+        logger.info(f"Successfully uploaded {file.filename} to gs://{GCS_BUCKET_NAME}/{blob_name}")
+        # Return the publicly accessible URL for the file
+        return blob.public_url
+
+    except Exception as e:
+        logger.error(f"Failed to upload {file.filename} to GCS. Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Could not upload file: {e}")
+
+# ADD THIS SECOND NEW HELPER FUNCTION
+async def delete_from_gcs(public_url: str):
+    """
+    Parses a public GCS URL to find the blob name and deletes the file from the bucket.
+    """
+    if not GCS_BUCKET_NAME or not public_url:
+        logger.warning("GCS_BUCKET_NAME not configured or no public_url provided. Skipping deletion.")
+        return
+
+    # The expected URL format is: https://storage.googleapis.com/BUCKET_NAME/BLOB_NAME
+    # We need to extract the BLOB_NAME.
+    try:
+        prefix = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/"
+        if not public_url.startswith(prefix):
+            logger.error(f"URL '{public_url}' does not match expected format. Cannot delete.")
+            return
+
+        blob_name = public_url.replace(prefix, "")
+        
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_name)
+        
+        if blob.exists():
+            blob.delete()
+            logger.info(f"Successfully deleted gs://{GCS_BUCKET_NAME}/{blob_name}")
+        else:
+            logger.warning(f"Attempted to delete non-existent blob: {blob_name}")
+
+    except Exception as e:
+        logger.error(f"Failed to delete {public_url} from GCS. Error: {e}")
+        # We don't raise an HTTPException here because we still want to proceed with
+        # deleting the database record even if the file deletion fails.
 
 async def process_bulk_upload_row(row_data, row_number, current_user):
     """Process a single row from bulk upload Excel"""
@@ -1232,81 +1293,35 @@ async def create_track(
     # Validate file sizes (500MB limit)
     max_size = 500 * 1024 * 1024  # 500MB in bytes
     
-    mp3_file_path = None
-    lyrics_file_path = None
-    session_file_path = None
-    singer_agreement_file_path = None
-    music_director_agreement_file_path = None
-    mp3_filename = None
-    lyrics_filename = None
-    session_filename = None
-    singer_agreement_filename = None
-    music_director_agreement_filename = None
+    # mp3_file_path = None
+    # lyrics_file_path = None
+    # session_file_path = None
+    # singer_agreement_file_path = None
+    # music_director_agreement_file_path = None
+    # mp3_filename = None
+    # lyrics_filename = None
+    # session_filename = None
+    # singer_agreement_filename = None
+    # music_director_agreement_filename = None
     
+    # These variables will hold the public URLs from GCS
+    mp3_url = None
+    lyrics_url = None
+    session_url = None
+    singer_agreement_url = None
+    music_director_agreement_url = None
+
+    # Upload each file to its designated folder in GCS
     if mp3_file:
-        if mp3_file.size > max_size:
-            raise HTTPException(status_code=413, detail="MP3 file too large. Maximum size is 500MB.")
-        
-        # Save MP3 file
-        file_extension = Path(mp3_file.filename).suffix
-        mp3_filename = f"{uuid.uuid4()}{file_extension}"
-        mp3_file_path = UPLOADS_DIR / mp3_filename
-        
-        async with aiofiles.open(mp3_file_path, 'wb') as f:
-            content = await mp3_file.read()
-            await f.write(content)
-    
+        mp3_url = await upload_to_gcs(mp3_file, "audio")
     if lyrics_file:
-        if lyrics_file.size > max_size:
-            raise HTTPException(status_code=413, detail="Lyrics file too large. Maximum size is 500MB.")
-        
-        # Save lyrics file
-        file_extension = Path(lyrics_file.filename).suffix
-        lyrics_filename = f"{uuid.uuid4()}{file_extension}"
-        lyrics_file_path = UPLOADS_DIR / lyrics_filename
-        
-        async with aiofiles.open(lyrics_file_path, 'wb') as f:
-            content = await lyrics_file.read()
-            await f.write(content)
-    
+        lyrics_url = await upload_to_gcs(lyrics_file, "lyrics")
     if session_file:
-        if session_file.size > max_size:
-            raise HTTPException(status_code=413, detail="Session file too large. Maximum size is 500MB.")
-        
-        # Save session file
-        file_extension = Path(session_file.filename).suffix
-        session_filename = f"{uuid.uuid4()}{file_extension}"
-        session_file_path = UPLOADS_DIR / session_filename
-        
-        async with aiofiles.open(session_file_path, 'wb') as f:
-            content = await session_file.read()
-            await f.write(content)
-    
+        session_url = await upload_to_gcs(session_file, "sessions")
     if singer_agreement_file:
-        if singer_agreement_file.size > max_size:
-            raise HTTPException(status_code=413, detail="Singer agreement file too large. Maximum size is 500MB.")
-        
-        # Save singer agreement file
-        file_extension = Path(singer_agreement_file.filename).suffix
-        singer_agreement_filename = f"{uuid.uuid4()}{file_extension}"
-        singer_agreement_file_path = UPLOADS_DIR / singer_agreement_filename
-        
-        async with aiofiles.open(singer_agreement_file_path, 'wb') as f:
-            content = await singer_agreement_file.read()
-            await f.write(content)
-    
+        singer_agreement_url = await upload_to_gcs(singer_agreement_file, "agreements")
     if music_director_agreement_file:
-        if music_director_agreement_file.size > max_size:
-            raise HTTPException(status_code=413, detail="Music director agreement file too large. Maximum size is 500MB.")
-        
-        # Save music director agreement file
-        file_extension = Path(music_director_agreement_file.filename).suffix
-        music_director_agreement_filename = f"{uuid.uuid4()}{file_extension}"
-        music_director_agreement_file_path = UPLOADS_DIR / music_director_agreement_filename
-        
-        async with aiofiles.open(music_director_agreement_file_path, 'wb') as f:
-            content = await music_director_agreement_file.read()
-            await f.write(content)
+        music_director_agreement_url = await upload_to_gcs(music_director_agreement_file, "agreements")
     
     # For managers, validate that they're uploading in their assigned language
     if current_user.user_type == "manager" and current_user.manager_id:
@@ -1338,16 +1353,17 @@ async def create_track(
         release_date=release_date,
         album_name=album_name,
         other_info=other_info,
-        mp3_file_path=str(mp3_file_path) if mp3_file_path else None,
-        lyrics_file_path=str(lyrics_file_path) if lyrics_file_path else None,
-        session_file_path=str(session_file_path) if session_file_path else None,
-        singer_agreement_file_path=str(singer_agreement_file_path) if singer_agreement_file_path else None,
-        music_director_agreement_file_path=str(music_director_agreement_file_path) if music_director_agreement_file_path else None,
-        mp3_filename=mp3_filename,
-        lyrics_filename=lyrics_filename,
-        session_filename=session_filename,
-        singer_agreement_filename=singer_agreement_filename,
-        music_director_agreement_filename=music_director_agreement_filename,
+        mp3_file_path=mp3_url,
+        lyrics_file_path=lyrics_url,
+        session_file_path=session_url,
+        singer_agreement_file_path=singer_agreement_url,
+        music_director_agreement_file_path=music_director_agreement_url,
+        # We can store the original filenames for user convenience
+        mp3_filename=mp3_file.filename if mp3_file else None,
+        lyrics_filename=lyrics_file.filename if lyrics_file else None,
+        session_filename=session_file.filename if session_file else None,
+        singer_agreement_filename=singer_agreement_file.filename if singer_agreement_file else None,
+        music_director_agreement_filename=music_director_agreement_file.filename if music_director_agreement_file else None,
         created_by=current_user.id,
         managed_by=managed_by
     )
@@ -1407,12 +1423,37 @@ async def get_tracks(
     tracks = await db.tracks.find(query).to_list(1000)
     return [MusicTrack(**parse_from_mongo(track)) for track in tracks]
 
-@api_router.get("/tracks/{track_id}", response_model=MusicTrack)
-async def get_track(track_id: str, current_user: User = Depends(get_current_user)):
+# REPLACE THE ENTIRE delete_track FUNCTION WITH THIS
+@api_router.delete("/tracks/{track_id}")
+async def delete_track(track_id: str, current_user: User = Depends(get_current_user)):
+    # Step 1: Find the track metadata in MongoDB
     track = await db.tracks.find_one({"id": track_id})
     if not track:
         raise HTTPException(status_code=404, detail="Track not found")
-    return MusicTrack(**parse_from_mongo(track))
+
+    # Step 2: Authorization (This logic remains unchanged)
+    if current_user.user_type == "manager":
+        if track.get("created_by") != current_user.id and track.get("managed_by") != current_user.manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this track")
+
+    # Step 3: Delete all associated files from Google Cloud Storage
+    file_path_fields = [
+        "mp3_file_path",
+        "lyrics_file_path",
+        "session_file_path",
+        "singer_agreement_file_path",
+        "music_director_agreement_file_path"
+    ]
+
+    for field in file_path_fields:
+        public_url = track.get(field)
+        if public_url:
+            await delete_from_gcs(public_url)
+
+    # Step 4: After deleting files, delete the record from MongoDB
+    await db.tracks.delete_one({"id": track_id})
+    
+    return {"message": "Track and associated files deleted successfully"}
 
 @api_router.get("/tracks/next-code/{full_prefix}")
 async def get_next_unique_code(full_prefix: str, current_user: User = Depends(get_current_user)):
