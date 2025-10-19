@@ -58,3 +58,5 @@ jobs:
             MONGO_URL=MONGO_URL:latest
             DB_NAME=DB_NAME:latest
             SECRET_KEY=SECRET_KEY:latest
+            GCS_BUCKET_NAME=GCS_BUCKET_NAME:latest
+            CORS_ORIGINS=CORS_ORIGINS:latest
