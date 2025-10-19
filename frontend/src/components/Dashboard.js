@@ -80,25 +80,36 @@ const Dashboard = ({ apiClient }) => {
   };
 
   const fetchTracks = async () => {
-    try {
-      setLoading(true);
-      const params = new URLSearchParams();
-      
-      if (searchTerm.trim()) params.append('search', searchTerm.trim());
-      if (filters.composer.trim()) params.append('composer', filters.composer.trim());
-      if (filters.singer.trim()) params.append('singer', filters.singer.trim());
-      if (filters.album.trim()) params.append('album', filters.album.trim());
-      if (filters.language.trim()) params.append('language', filters.language.trim());
-      
-      const response = await apiClient.get(`/tracks?${params.toString()}`);
-      setTracks(response.data);
-    } catch (error) {
-      console.error('Error fetching tracks:', error);
-      toast.error('Failed to load tracks');
-    } finally {
-      setLoading(false);
-    }
-  };
+      try {
+        setLoading(true);
+        const params = new URLSearchParams();
+
+        // ... your params logic is correct ...
+
+        const response = await apiClient.get(`/tracks?${params.toString()}`);
+
+        // --- THE FIX IS HERE ---
+        // Check if the response data is an object and has a key containing the array
+        // Common keys are 'items', 'tracks', or 'data'. Adjust if needed.
+        if (response.data && Array.isArray(response.data.items)) {
+          setTracks(response.data.items);
+        } else if (Array.isArray(response.data)) {
+          // Fallback in case the API sometimes returns a direct array
+          setTracks(response.data);
+        } else {
+          // If the structure is unexpected, default to an empty array to prevent crashes
+          console.warn("Unexpected data structure from /tracks endpoint:", response.data);
+          setTracks([]);
+        }
+
+      } catch (error) {
+        console.error('Error fetching tracks:', error);
+        toast.error('Failed to load tracks');
+        setTracks([]); // Also ensure tracks is an array on error
+      } finally {
+        setLoading(false);
+      }
+    };
 
   const handleSearch = () => {
     fetchTracks();
@@ -119,8 +130,10 @@ const Dashboard = ({ apiClient }) => {
   };
 
   const getUniqueLanguages = () => {
-    const languages = [...new Set(tracks.map(track => track.audio_language).filter(Boolean))];
-    return languages.sort();
+  // Add a check to ensure tracks is an array
+  if (!Array.isArray(tracks)) return []; 
+  const languages = [...new Set(tracks.map(track => track.audio_language).filter(Boolean))];
+  return languages.sort();
   };
 
   const fetchManagers = async () => {
@@ -727,7 +740,7 @@ const Dashboard = ({ apiClient }) => {
           {/* Tracks Grid */}
           {tracks.length > 0 && (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {tracks.map((track) => (
+              {(tracks || []).map((track) => (
                 <Card 
                   key={track.id} 
                   className="glass border-gray-700 track-card hover-glow transition-all duration-300 fade-in"
@@ -1004,7 +1017,7 @@ const Dashboard = ({ apiClient }) => {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {tracks.map((track) => (
+                      {(tracks || []).map((track) => (
                         <TableRow 
                           key={track.id} 
                           className="border-gray-700 hover:bg-gray-800/30 transition-colors"

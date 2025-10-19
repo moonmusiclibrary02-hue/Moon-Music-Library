@@ -34,16 +34,17 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Build and Push Docker Image to Artifact Registry
-        run: |-
-          # Enable Docker authentication for Artifact Registry
-          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
-          
-          # Build and tag the image with the full Artifact Registry path
-          docker build -t us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/music-library-images/music-frontend-image:latest ./frontend
-          
-          # Push the image
-          docker push us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/music-library-images/music-frontend-image:latest
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: frontend/Dockerfile
+          push: true
+          tags: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/music-library-images/music-frontend-image:latest
+          # --- ADD THIS BLOCK ---
+          build-args: |
+            REACT_APP_BACKEND_URL=${{ secrets.BACKEND_URL }}
+
 
       - name: Deploy to Cloud Run
         id: deploy
@@ -51,7 +52,6 @@ jobs:
         with:
           service: music-frontend-service
           region: us-central1
-          # Point to the image in Artifact Registry
           image: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/music-library-images/music-frontend-image:latest
-          env_vars: |-
-            REACT_APP_BACKEND_URL=${{ secrets.BACKEND_URL }}
+          # This env_vars block is no longer needed here for the frontend, 
+          # because the value is now baked into the static files.
