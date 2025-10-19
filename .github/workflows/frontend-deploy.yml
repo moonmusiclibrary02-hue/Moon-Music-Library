@@ -1,6 +1,6 @@
 # .github/workflows/frontend-deploy.yml
 
-name: Deploy Frontend to Cloud Run 
+name: Deploy Frontend to Cloud Run
 
 on:
   push:
@@ -28,23 +28,22 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: 'projects/175236630501/locations/global/workloadIdentityPools/moon-music-wif-pool/providers/github-provider'
-          # Using double quotes to ensure the secret is expanded
           service_account: "github-actions-deployer@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com"
 
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Build and Push Docker Image
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: frontend/Dockerfile
+          # --- THIS IS THE CORRECTED LINE ---
+          # Set the context to the 'frontend' sub-directory
+          context: ./frontend
           push: true
           tags: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/music-library-images/music-frontend-image:latest
-          # --- ADD THIS BLOCK ---
+          # Pass the backend URL as a build-time argument to Docker
           build-args: |
             REACT_APP_BACKEND_URL=${{ secrets.BACKEND_URL }}
-
 
       - name: Deploy to Cloud Run
         id: deploy
@@ -52,6 +51,7 @@ jobs:
         with:
           service: music-frontend-service
           region: us-central1
+          # Point to the image that was just pushed
           image: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/music-library-images/music-frontend-image:latest
-          # This env_vars block is no longer needed here for the frontend, 
-          # because the value is now baked into the static files.
+          # The REACT_APP_BACKEND_URL is now baked into the container,
+          # so the 'env_vars' section is not needed for this variable.
