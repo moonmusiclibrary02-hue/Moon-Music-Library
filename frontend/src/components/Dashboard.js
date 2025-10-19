@@ -740,7 +740,7 @@ const Dashboard = ({ apiClient }) => {
           {/* Tracks Grid */}
           {tracks.length > 0 && (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {tracks.map((track) => (
+              {(tracks || []).map((track) => (
                 <Card 
                   key={track.id} 
                   className="glass border-gray-700 track-card hover-glow transition-all duration-300 fade-in"
@@ -1017,7 +1017,7 @@ const Dashboard = ({ apiClient }) => {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {tracks.map((track) => (
+                      {(tracks || []).map((track) => (
                         <TableRow 
                           key={track.id} 
                           className="border-gray-700 hover:bg-gray-800/30 transition-colors"
