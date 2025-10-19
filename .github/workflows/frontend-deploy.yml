@@ -54,4 +54,4 @@ jobs:
           # Point to the image in Artifact Registry
           image: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/music-library-images/music-frontend-image:latest
           env_vars: |-
-            BACKEND_URL=${{ secrets.BACKEND_URL }}
+            REACT_APP_BACKEND_URL=${{ secrets.BACKEND_URL }}
