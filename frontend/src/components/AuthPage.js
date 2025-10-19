@@ -20,8 +20,11 @@ const AuthPage = ({ onLogin, onRegister }) => {
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoading(true);
-    await onLogin(loginForm.email, loginForm.password);
+    const result = await onLogin(loginForm.email, loginForm.password);
     setLoading(false);
+    if (result.success) {
+      window.location.href = '/';
+    }
   };
 
   const handleRegister = async (e) => {
