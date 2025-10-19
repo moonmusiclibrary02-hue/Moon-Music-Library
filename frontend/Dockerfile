@@ -1,25 +1,41 @@
 # frontend/Dockerfile
 
-# Stage 1: Build the React application
-FROM node:18-alpine AS build
+# --- Stage 1: Build the React application ---
+FROM node:18-slim AS build
+
 WORKDIR /app
+
+# Copy package files and install all dependencies
 COPY package.json ./
 COPY package-lock.json ./
 RUN npm install
+
+# Copy the rest of the source code
 COPY . ./
+
+# Create the production build
 RUN npm run build
 
-# Stage 2: Serve the static files with a lightweight server
-FROM node:18-alpine
+
+# --- Stage 2: Serve the application from a lightweight image ---
+FROM node:18-slim
+
 WORKDIR /app
 
-# Copy the package.json to install the 'serve' dependency
+# Copy only the necessary files for production
 COPY package.json ./
 COPY package-lock.json ./
+
+# Install ONLY production dependencies (like 'serve')
 RUN npm install --omit=dev
 
-# Copy the build output from the build stage
+# Copy the static build files from the 'build' stage
 COPY --from=build /app/build ./build
 
-# This command runs the "start": "serve -s build" script from package.json
-CMD [ "npm", "start" ]
+# The port the container will listen on. Cloud Run will provide this via env var.
+EXPOSE 8080
+
+# The command to start the app.
+# This runs 'serve' directly instead of through 'npm start'.
+# 'serve' automatically listens on the PORT environment variable.
+CMD [ "npx", "serve", "-s", "build" ]

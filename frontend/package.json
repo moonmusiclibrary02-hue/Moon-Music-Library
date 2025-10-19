@@ -58,9 +58,9 @@
   },
   "scripts": {
     "start": "serve -s build",
-    "start": "craco start",
     "build": "craco build",
-    "test": "craco test"
+    "test": "craco test",
+    "eject": "react-scripts eject"
   },
   "browserslist": {
     "production": [
