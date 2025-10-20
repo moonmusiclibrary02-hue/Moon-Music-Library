@@ -4,6 +4,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response, RedirectResponse, StreamingResponse
 from io import BytesIO
 from dotenv import load_dotenv
+import tempfile
+from google.cloud.exceptions import NotFound
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import hashlib
@@ -467,7 +469,21 @@ def extract_google_drive_file_id(url):
     return None
 
 async def download_from_google_drive(url, filename):
-    """Download file from Google Drive URL"""
+    """
+    Download file from Google Drive URL to a temporary file.
+    
+    Args:
+        url: Google Drive sharing URL
+        filename: Original filename with extension
+    
+    Returns:
+        str: Path to the temporary file with downloaded content
+        
+    Raises:
+        ValueError: If file ID cannot be extracted or download fails
+        URLError: If network or server errors occur
+        IOError: If file writing fails
+    """
     try:
         file_id = extract_google_drive_file_id(url)
         if not file_id:
@@ -476,14 +492,33 @@ async def download_from_google_drive(url, filename):
         # Use direct download URL
         download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
         
-        # Download the file
-        file_path = UPLOADS_DIR / filename
-        urllib.request.urlretrieve(download_url, file_path)
-        
-        return str(file_path)
+        # Create a temporary file with the correct extension
+        suffix = Path(filename).suffix
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
+            try:
+                # Download and write the content to the temp file
+                urllib.request.urlretrieve(download_url, temp_file.name)
+                return temp_file.name
+            except Exception as e:
+                # Clean up the temp file if download fails
+                try:
+                    os.unlink(temp_file.name)
+                except:
+                    pass
+                raise e
+                
+    except ValueError as e:
+        logger.error(f"Invalid Google Drive URL or file ID: {e}")
+        raise
+    except urllib.error.URLError as e:
+        logger.error(f"Network error downloading from Google Drive: {e}")
+        raise ValueError(f"Failed to download file - network error: {str(e)}")
+    except IOError as e:
+        logger.error(f"IO error while writing downloaded file: {e}")
+        raise ValueError(f"Failed to save downloaded file: {str(e)}")
     except Exception as e:
-        logger.error(f"Error downloading from Google Drive: {e}")
-        raise ValueError(f"Failed to download file from Google Drive: {str(e)}")
+        logger.error(f"Unexpected error downloading from Google Drive: {e}")
+        raise ValueError(f"Failed to download file: {str(e)}")
 
 def generate_excel_template():
     """Generate Excel template for bulk upload"""
@@ -645,46 +680,45 @@ async def read_gcs_text(blob_name: str) -> str:
         logger.exception(f"Failed to read text from blob: {blob_name}")
         raise HTTPException(status_code=500, detail=f"Could not read file content: {e}") from e
 # DELETE helper for GCS
-async def delete_from_gcs(blob_name: str):
+async def delete_from_gcs(file_reference: str):
     """
-    Deletes a file from the GCS bucket using its blob name.
+    Deletes a file from the GCS bucket using either a blob name or a public URL.
+    
+    Args:
+        file_reference: Either a GCS blob name or a public URL from storage.googleapis.com
+        
+    Returns:
+        None. Logs success or failure but doesn't raise exceptions.
     """
-    if not GCS_BUCKET_NAME or not blob_name:
-        logger.warning("GCS_BUCKET_NAME not configured or no blob_name provided. Skipping deletion.")
+    if not GCS_BUCKET_NAME or not file_reference:
+        logger.warning("GCS_BUCKET_NAME not configured or no file reference provided. Skipping deletion.")
         return
 
     try:
+        # Normalize input - extract blob name from URL if needed
+        blob_name = file_reference
+        if file_reference.startswith("https://storage.googleapis.com/"):
+            prefix = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/"
+            if not file_reference.startswith(prefix):
+                logger.error(f"URL '{file_reference}' does not match bucket {GCS_BUCKET_NAME}. Cannot delete.")
+                return
+            blob_name = file_reference.replace(prefix, "")
+
+        # Get bucket and blob references
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(blob_name)
-        await asyncio.to_thread(blob.delete)
-        logger.info(f"Successfully deleted blob: {blob_name}")
-    except Exception as e:
-        logger.exception(f"Failed to delete blob: {blob_name}")
-        # Don't raise an exception here as this is often called during cleanup
 
-    # The expected URL format is: https://storage.googleapis.com/BUCKET_NAME/BLOB_NAME
-    # We need to extract the BLOB_NAME.
-    try:
-        prefix = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/"
-        if not public_url.startswith(prefix):
-            logger.error(f"URL '{public_url}' does not match expected format. Cannot delete.")
-            return
-
-        blob_name = public_url.replace(prefix, "")
-        
-        bucket = storage_client.bucket(GCS_BUCKET_NAME)
-        blob = bucket.blob(blob_name)
-        
-        if blob.exists():
-            blob.delete()
+        # Check existence and delete using asyncio.to_thread for blocking operations
+        exists = await asyncio.to_thread(blob.exists)
+        if exists:
+            await asyncio.to_thread(blob.delete)
             logger.info(f"Successfully deleted gs://{GCS_BUCKET_NAME}/{blob_name}")
         else:
             logger.warning(f"Attempted to delete non-existent blob: {blob_name}")
 
     except Exception as e:
-        logger.error(f"Failed to delete {public_url} from GCS. Error: {e}")
-        # We don't raise an HTTPException here because we still want to proceed with
-        # deleting the database record even if the file deletion fails.
+        logger.exception(f"Failed to delete {blob_name} from GCS: {str(e)}")
+        # We don't raise an exception as this is often called during cleanup
 
 async def process_bulk_upload_row(row_data, row_number, current_user):
     """Process a single row from bulk upload Excel"""
@@ -1510,18 +1544,19 @@ async def delete_track(track_id: str, current_user: User = Depends(get_current_u
             raise HTTPException(status_code=403, detail="Not authorized to delete this track")
 
     # Step 3: Delete all associated files from Google Cloud Storage
-    file_path_fields = [
-        "mp3_file_path",
-        "lyrics_file_path",
-        "session_file_path",
-        "singer_agreement_file_path",
-        "music_director_agreement_file_path"
+    blob_name_fields = [
+        "mp3_blob_name",
+        "lyrics_blob_name",
+        "session_blob_name",
+        "singer_agreement_blob_name",
+        "music_director_agreement_blob_name"
     ]
 
-    for field in file_path_fields:
-        public_url = track.get(field)
-        if public_url:
-            await delete_from_gcs(public_url)
+    # Delete GCS blobs
+    for field in blob_name_fields:
+        blob_name = track.get(field)
+        if blob_name:
+            await delete_from_gcs(blob_name)
 
     # Step 4: After deleting files, delete the record from MongoDB
     await db.tracks.delete_one({"id": track_id})
@@ -1607,34 +1642,7 @@ async def update_track(
     updated_track = await db.tracks.find_one({"id": track_id})
     return MusicTrack(**parse_from_mongo(updated_track))
 
-@api_router.delete("/tracks/{track_id}")
-async def delete_track(track_id: str, current_user: User = Depends(get_current_user)):
-    track = await db.tracks.find_one({"id": track_id})
-    if not track:
-        raise HTTPException(status_code=404, detail="Track not found")
-    
-    # Authorization: Admins can delete any track, Managers can only delete their own tracks
-    if current_user.user_type == "manager":
-        if track["created_by"] != current_user.id and track.get("managed_by") != current_user.manager_id:
-            raise HTTPException(status_code=403, detail="Not authorized to delete this track")
-    # Admins can delete any track (no additional check needed)
-    
-    # Delete files
-    if track.get("mp3_file_path") and Path(track["mp3_file_path"]).exists():
-        Path(track["mp3_file_path"]).unlink()
-    
-    if track.get("lyrics_file_path") and Path(track["lyrics_file_path"]).exists():
-        Path(track["lyrics_file_path"]).unlink()
-    
-    if track.get("session_file_path") and Path(track["session_file_path"]).exists():
-        Path(track["session_file_path"]).unlink()
-    
-    if track.get("singer_agreement_file_path") and Path(track["singer_agreement_file_path"]).exists():
-        Path(track["singer_agreement_file_path"]).unlink()
-    
-    if track.get("music_director_agreement_file_path") and Path(track["music_director_agreement_file_path"]).exists():
-        Path(track["music_director_agreement_file_path"]).unlink()
-    
+# Delete track route moved to lines ~1501-1531 for GCS implementation
     await db.tracks.delete_one({"id": track_id})
     return {"message": "Track deleted successfully"}
 
@@ -1745,9 +1753,6 @@ async def get_lyrics_content(
     except Exception as e:
         logger.exception(f"Failed to read lyrics from GCS blob: {lyrics_blob_name}")
         raise HTTPException(status_code=500, detail="Could not read lyrics file")
-
-from fastapi.responses import RedirectResponse, StreamingResponse
-from google.cloud.exceptions import NotFound
 
 @api_router.get("/tracks/{track_id}/download/{file_type}")
 async def download_file(
