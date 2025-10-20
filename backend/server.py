@@ -47,13 +47,11 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 # Configure logging (moved before GCS initialization)
-import logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
 # --- Google Cloud Storage (GCS) Connection ---
 # This environment variable will be injected from Secret Manager by our CI/CD pipeline.
 GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME')
@@ -61,7 +59,15 @@ storage_client = storage.Client()
 
 # A quick check to ensure the GCS bucket name is configured on startup.
 if not GCS_BUCKET_NAME:
-    logger.error("FATAL: GCS_BUCKET_NAME environment variable is not set.")
+    logger.critical("FATAL: GCS_BUCKET_NAME environment variable is not set.")
+    raise SystemExit(1)
+
+# Optional: verify bucket exists early (can be removed if it slows cold starts)
+# try:
+#     storage_client.get_bucket(GCS_BUCKET_NAME)
+# except Exception as e:
+#     logger.critical("FATAL: GCS bucket '%s' not accessible: %s", GCS_BUCKET_NAME, e)
+#     raise SystemExit(1) from e
 
 # Create the main app
 app = FastAPI(title="Music Production Inventory")
@@ -653,7 +659,7 @@ async def generate_signed_url(blob_name: str, expiration_minutes: int = 60) -> s
         # Generate signed URL that expires in specified minutes
         url = await asyncio.to_thread(
             blob.generate_signed_url,
-            expiration=datetime.timedelta(minutes=expiration_minutes),
+            expiration=timedelta(minutes=expiration_minutes),
             method="GET",
             version="v4"
         )
@@ -661,7 +667,6 @@ async def generate_signed_url(blob_name: str, expiration_minutes: int = 60) -> s
     except Exception as e:
         logger.exception(f"Failed to generate signed URL for blob: {blob_name}")
         raise HTTPException(status_code=500, detail=f"Could not generate signed URL: {e}") from e
-
 async def read_gcs_text(blob_name: str) -> str:
     """
     Read text content from a GCS blob.
@@ -1410,14 +1415,9 @@ async def create_track(
     # These variables will hold the public URLs from GCS
     mp3_url = None
     lyrics_url = None
-    
-    # These variables will hold the public URLs from GCS
-    mp3_url = None
-    lyrics_url = None
     session_url = None
     singer_agreement_url = None
     music_director_agreement_url = None
-
     # Upload each file to its designated folder in GCS
     if mp3_file:
         mp3_url = await upload_to_gcs(mp3_file, "audio")
@@ -1642,10 +1642,7 @@ async def update_track(
     updated_track = await db.tracks.find_one({"id": track_id})
     return MusicTrack(**parse_from_mongo(updated_track))
 
-# Delete track route moved to lines ~1501-1531 for GCS implementation
-    await db.tracks.delete_one({"id": track_id})
-    return {"message": "Track deleted successfully"}
-
+# (obsolete code removed)
 @api_router.get("/tracks/bulk-upload/template")
 async def download_bulk_upload_template(current_user: User = Depends(get_current_user)):
     """Download Excel template for bulk upload"""
