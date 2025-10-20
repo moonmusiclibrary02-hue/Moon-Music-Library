@@ -1642,10 +1642,7 @@ async def update_track(
     updated_track = await db.tracks.find_one({"id": track_id})
     return MusicTrack(**parse_from_mongo(updated_track))
 
-# Delete track route moved to lines ~1501-1531 for GCS implementation
-    await db.tracks.delete_one({"id": track_id})
-    return {"message": "Track deleted successfully"}
-
+# (obsolete code removed)
 @api_router.get("/tracks/bulk-upload/template")
 async def download_bulk_upload_template(current_user: User = Depends(get_current_user)):
     """Download Excel template for bulk upload"""
