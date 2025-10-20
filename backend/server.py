@@ -56,7 +56,15 @@ storage_client = storage.Client()
 
 # A quick check to ensure the GCS bucket name is configured on startup.
 if not GCS_BUCKET_NAME:
-    logger.error("FATAL: GCS_BUCKET_NAME environment variable is not set.")
+    logger.critical("FATAL: GCS_BUCKET_NAME environment variable is not set.")
+    raise SystemExit(1)
+
+# Optional: verify bucket exists early (can be removed if it slows cold starts)
+# try:
+#     storage_client.get_bucket(GCS_BUCKET_NAME)
+# except Exception as e:
+#     logger.critical("FATAL: GCS bucket '%s' not accessible: %s", GCS_BUCKET_NAME, e)
+#     raise SystemExit(1) from e
 
 # Create the main app
 app = FastAPI(title="Music Production Inventory")
