@@ -46,28 +46,29 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Configure logging (moved before GCS initialization)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Initialize logger
 logger = logging.getLogger(__name__)
+
 # --- Google Cloud Storage (GCS) Connection ---
 # This environment variable will be injected from Secret Manager by our CI/CD pipeline.
 GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME')
-storage_client = storage.Client()
 
-# A quick check to ensure the GCS bucket name is configured on startup.
+# Validate GCS configuration before creating client
 if not GCS_BUCKET_NAME:
     logger.critical("FATAL: GCS_BUCKET_NAME environment variable is not set.")
     raise SystemExit(1)
 
-# Optional: verify bucket exists early (can be removed if it slows cold starts)
-# try:
-#     storage_client.get_bucket(GCS_BUCKET_NAME)
-# except Exception as e:
-#     logger.critical("FATAL: GCS bucket '%s' not accessible: %s", GCS_BUCKET_NAME, e)
-#     raise SystemExit(1) from e
+# Initialize GCS client
+try:
+    storage_client = storage.Client()
+    # Verify we can access the bucket (optional)
+    storage_client.get_bucket(GCS_BUCKET_NAME)
+    logger.info(f"Successfully connected to GCS bucket: {GCS_BUCKET_NAME}")
+except Exception as e:
+    logger.critical(f"FATAL: Failed to initialize GCS client or access bucket: {str(e)}")
+    raise SystemExit(1) from e
+
+
 
 # Create the main app
 app = FastAPI(title="Music Production Inventory")
@@ -509,9 +510,9 @@ async def download_from_google_drive(url, filename):
                 # Clean up the temp file if download fails
                 try:
                     os.unlink(temp_file.name)
-                except:
-                    pass
-                raise e
+                except Exception as cleanup_exc:
+                    logger.warning(f"Failed to clean up temporary file {temp_file.name}: {cleanup_exc}")
+                raise
                 
     except ValueError as e:
         logger.error(f"Invalid Google Drive URL or file ID: {e}")
@@ -632,11 +633,14 @@ async def upload_to_gcs(file: UploadFile, folder: str) -> str:
         blob_name = f"{folder}/{uuid.uuid4()}_{file.filename}"
         blob = bucket.blob(blob_name)
         
-        # Get file content from the upload
-        content = await file.read()
-        
-        # Upload the content to GCS using a thread to avoid blocking
-        await asyncio.to_thread(blob.upload_from_string, content, content_type=file.content_type)
+        # Stream the file directly to GCS using upload_from_file
+        # This avoids loading the entire file into memory
+        await asyncio.to_thread(
+            blob.upload_from_file,
+            file.file,
+            content_type=file.content_type,
+            rewind=True
+        )
         
         logger.info(f"Successfully uploaded {file.filename} to gs://{GCS_BUCKET_NAME}/{blob_name}")
     except Exception as e:
@@ -722,7 +726,7 @@ async def delete_from_gcs(file_reference: str):
             logger.warning(f"Attempted to delete non-existent blob: {blob_name}")
 
     except Exception as e:
-        logger.exception(f"Failed to delete {blob_name} from GCS: {str(e)}")
+        logger.exception(f"Failed to delete {blob_name} from GCS")
         # We don't raise an exception as this is often called during cleanup
 
 async def process_bulk_upload_row(row_data, row_number, current_user):
@@ -1787,15 +1791,27 @@ async def download_file(
             bucket = storage_client.bucket(GCS_BUCKET_NAME)
             blob = bucket.blob(blob_name)
             
-            # Define a generator function to stream the content
+            # Define a generator function to stream the content in chunks
             async def content_stream():
                 try:
-                    # Download in chunks to avoid memory issues with large files
-                    content = await asyncio.to_thread(blob.download_as_bytes)
-                    yield content
+                    # Use download_to_file with a temporary file to enable chunked streaming
+                    chunk_size = 1024 * 1024  # 1MB chunks
+                    # Use blob.download_as_bytes() with start/end for chunked download
+                    total_bytes = blob.size
+                    position = 0
+                    
+                    while position < total_bytes:
+                        end = min(position + chunk_size, total_bytes)
+                        chunk = await asyncio.to_thread(
+                            blob.download_as_bytes,
+                            start=position,
+                            end=end - 1
+                        )
+                        yield chunk
+                        position = end
                 except Exception as e:
-                    logger.exception(f"Failed to stream content from blob: {blob_name}")
-                    raise HTTPException(status_code=500, detail="Failed to stream file content")
+                    logger.exception(f"Failed to stream content from blob {blob_name}")
+                    raise HTTPException(status_code=500, detail=f"Failed to stream file content: {str(e)}") from e
             
             headers = {
                 'Content-Disposition': f'attachment; filename="{track["unique_code"]}_{track["title"]}_{filename}"'
