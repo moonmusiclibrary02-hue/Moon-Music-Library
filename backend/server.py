@@ -1,8 +1,11 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Form, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, RedirectResponse, StreamingResponse
+from io import BytesIO
 from dotenv import load_dotenv
+import tempfile
+from google.cloud.exceptions import NotFound
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import hashlib
@@ -25,6 +28,7 @@ import io
 import urllib.request
 import re
 from urllib.parse import urlparse, parse_qs
+from google.cloud import storage
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv()
@@ -42,25 +46,34 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create uploads directory
-UPLOADS_DIR = Path("/app/uploads")
-UPLOADS_DIR.mkdir(exist_ok=True)
+# Initialize logger
+logger = logging.getLogger(__name__)
+
+# --- Google Cloud Storage (GCS) Connection ---
+# This environment variable will be injected from Secret Manager by our CI/CD pipeline.
+GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME')
+
+# Validate GCS configuration before creating client
+if not GCS_BUCKET_NAME:
+    logger.critical("FATAL: GCS_BUCKET_NAME environment variable is not set.")
+    raise SystemExit(1)
+
+# Initialize GCS client
+try:
+    storage_client = storage.Client()
+    # Verify we can access the bucket (optional)
+    storage_client.get_bucket(GCS_BUCKET_NAME)
+    logger.info(f"Successfully connected to GCS bucket: {GCS_BUCKET_NAME}")
+except Exception as e:
+    logger.critical(f"FATAL: Failed to initialize GCS client or access bucket: {str(e)}")
+    raise SystemExit(1) from e
+
+
 
 # Create the main app
 app = FastAPI(title="Music Production Inventory")
 
-# Mount static files under /api/files to ensure proper routing with CORS support
-class CORSStaticFiles(StaticFiles):
-    async def get_response(self, path: str, scope) -> Response:
-        response = await super().get_response(path, scope)
-        # Add CORS headers for audio files
-        if path.endswith(('.mp3', '.wav', '.ogg', '.m4a', '.flac')):
-            response.headers["Access-Control-Allow-Origin"] = "*"
-            response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "*"
-        return response
 
-app.mount("/api/files", CORSStaticFiles(directory="/app/uploads"), name="files")
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
@@ -141,6 +154,13 @@ class MusicTrack(BaseModel):
     release_date: Optional[str] = None
     album_name: Optional[str] = None
     other_info: Optional[str] = None
+    # GCS blob names for file storage
+    mp3_blob_name: Optional[str] = None
+    lyrics_blob_name: Optional[str] = None
+    session_blob_name: Optional[str] = None
+    singer_agreement_blob_name: Optional[str] = None
+    music_director_agreement_blob_name: Optional[str] = None
+    # Legacy file paths - to be removed after migration
     mp3_file_path: Optional[str] = None
     lyrics_file_path: Optional[str] = None
     session_file_path: Optional[str] = None
@@ -456,7 +476,21 @@ def extract_google_drive_file_id(url):
     return None
 
 async def download_from_google_drive(url, filename):
-    """Download file from Google Drive URL"""
+    """
+    Download file from Google Drive URL to a temporary file.
+    
+    Args:
+        url: Google Drive sharing URL
+        filename: Original filename with extension
+    
+    Returns:
+        str: Path to the temporary file with downloaded content
+        
+    Raises:
+        ValueError: If file ID cannot be extracted or download fails
+        URLError: If network or server errors occur
+        IOError: If file writing fails
+    """
     try:
         file_id = extract_google_drive_file_id(url)
         if not file_id:
@@ -465,14 +499,33 @@ async def download_from_google_drive(url, filename):
         # Use direct download URL
         download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
         
-        # Download the file
-        file_path = UPLOADS_DIR / filename
-        urllib.request.urlretrieve(download_url, file_path)
-        
-        return str(file_path)
+        # Create a temporary file with the correct extension
+        suffix = Path(filename).suffix
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
+            try:
+                # Download and write the content to the temp file
+                urllib.request.urlretrieve(download_url, temp_file.name)
+                return temp_file.name
+            except Exception as e:
+                # Clean up the temp file if download fails
+                try:
+                    os.unlink(temp_file.name)
+                except Exception as cleanup_exc:
+                    logger.warning(f"Failed to clean up temporary file {temp_file.name}: {cleanup_exc}")
+                raise
+                
+    except ValueError as e:
+        logger.error(f"Invalid Google Drive URL or file ID: {e}")
+        raise
+    except urllib.error.URLError as e:
+        logger.error(f"Network error downloading from Google Drive: {e}")
+        raise ValueError(f"Failed to download file - network error: {str(e)}")
+    except IOError as e:
+        logger.error(f"IO error while writing downloaded file: {e}")
+        raise ValueError(f"Failed to save downloaded file: {str(e)}")
     except Exception as e:
-        logger.error(f"Error downloading from Google Drive: {e}")
-        raise ValueError(f"Failed to download file from Google Drive: {str(e)}")
+        logger.error(f"Unexpected error downloading from Google Drive: {e}")
+        raise ValueError(f"Failed to download file: {str(e)}")
 
 def generate_excel_template():
     """Generate Excel template for bulk upload"""
@@ -562,6 +615,119 @@ def generate_excel_template():
             sheet.column_dimensions[column_letter].width = adjusted_width
     
     return wb
+
+import asyncio
+
+async def upload_to_gcs(file: UploadFile, folder: str) -> str:
+    """
+    Uploads a file to a specified folder in the GCS bucket and returns its blob name.
+    """
+    if not GCS_BUCKET_NAME:
+        raise HTTPException(status_code=500, detail="GCS bucket name is not configured.")
+    
+    try:
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        
+        # Create a unique filename using a UUID to prevent collisions.
+        # Format: audio/123e4567-e89b-12d3-a456-426614174000_my-song.mp3
+        blob_name = f"{folder}/{uuid.uuid4()}_{file.filename}"
+        blob = bucket.blob(blob_name)
+        
+        # Stream the file directly to GCS using upload_from_file
+        # This avoids loading the entire file into memory
+        await asyncio.to_thread(
+            blob.upload_from_file,
+            file.file,
+            content_type=file.content_type,
+            rewind=True
+        )
+        
+        logger.info(f"Successfully uploaded {file.filename} to gs://{GCS_BUCKET_NAME}/{blob_name}")
+    except Exception as e:
+        logger.exception(f"Failed to upload {file.filename} to GCS")
+        raise HTTPException(status_code=500, detail=f"Could not upload file: {e}") from e
+    
+    return blob_name
+
+async def generate_signed_url(blob_name: str, expiration_minutes: int = 60) -> str:
+    """
+    Generate a signed URL for a GCS blob with configurable expiration time.
+    """
+    if not GCS_BUCKET_NAME or not blob_name:
+        raise HTTPException(status_code=500, detail="GCS bucket name or blob name not configured.")
+    
+    try:
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_name)
+        
+        # Generate signed URL that expires in specified minutes
+        url = await asyncio.to_thread(
+            blob.generate_signed_url,
+            expiration=timedelta(minutes=expiration_minutes),
+            method="GET",
+            version="v4"
+        )
+        return url
+    except Exception as e:
+        logger.exception(f"Failed to generate signed URL for blob: {blob_name}")
+        raise HTTPException(status_code=500, detail=f"Could not generate signed URL: {e}") from e
+async def read_gcs_text(blob_name: str) -> str:
+    """
+    Read text content from a GCS blob.
+    """
+    if not GCS_BUCKET_NAME or not blob_name:
+        raise HTTPException(status_code=500, detail="GCS bucket name or blob name not configured.")
+    
+    try:
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_name)
+        
+        # Download the blob content as text using a thread to avoid blocking
+        content = await asyncio.to_thread(blob.download_as_text)
+        return content
+    except Exception as e:
+        logger.exception(f"Failed to read text from blob: {blob_name}")
+        raise HTTPException(status_code=500, detail=f"Could not read file content: {e}") from e
+# DELETE helper for GCS
+async def delete_from_gcs(file_reference: str):
+    """
+    Deletes a file from the GCS bucket using either a blob name or a public URL.
+    
+    Args:
+        file_reference: Either a GCS blob name or a public URL from storage.googleapis.com
+        
+    Returns:
+        None. Logs success or failure but doesn't raise exceptions.
+    """
+    if not GCS_BUCKET_NAME or not file_reference:
+        logger.warning("GCS_BUCKET_NAME not configured or no file reference provided. Skipping deletion.")
+        return
+
+    try:
+        # Normalize input - extract blob name from URL if needed
+        blob_name = file_reference
+        if file_reference.startswith("https://storage.googleapis.com/"):
+            prefix = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/"
+            if not file_reference.startswith(prefix):
+                logger.error(f"URL '{file_reference}' does not match bucket {GCS_BUCKET_NAME}. Cannot delete.")
+                return
+            blob_name = file_reference.replace(prefix, "")
+
+        # Get bucket and blob references
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_name)
+
+        # Check existence and delete using asyncio.to_thread for blocking operations
+        exists = await asyncio.to_thread(blob.exists)
+        if exists:
+            await asyncio.to_thread(blob.delete)
+            logger.info(f"Successfully deleted gs://{GCS_BUCKET_NAME}/{blob_name}")
+        else:
+            logger.warning(f"Attempted to delete non-existent blob: {blob_name}")
+
+    except Exception as e:
+        logger.exception(f"Failed to delete {blob_name} from GCS")
+        # We don't raise an exception as this is often called during cleanup
 
 async def process_bulk_upload_row(row_data, row_number, current_user):
     """Process a single row from bulk upload Excel"""
@@ -660,28 +826,46 @@ async def process_bulk_upload_row(row_data, row_number, current_user):
         
         serial_number = f"{serial_prefix}{next_serial_number:04d}"
         
-        # Handle file downloads from Google Drive
-        file_paths = {}
+        # Handle file downloads from Google Drive and upload to GCS
+        blob_names = {}
         file_names = {}
         
         google_drive_fields = {
-            'Audio File Google Drive Link': ('mp3_file_path', 'mp3_filename', '.mp3'),
-            'Lyrics File Google Drive Link': ('lyrics_file_path', 'lyrics_filename', '.txt'),
-            'Session File Google Drive Link': ('session_file_path', 'session_filename', '.zip'),
-            'Singer Agreement Google Drive Link': ('singer_agreement_file_path', 'singer_agreement_filename', '.pdf'),
-            'Music Director Agreement Google Drive Link': ('music_director_agreement_file_path', 'music_director_agreement_filename', '.pdf')
+            'Audio File Google Drive Link': ('mp3_blob_name', 'mp3_filename', '.mp3', 'audio'),
+            'Lyrics File Google Drive Link': ('lyrics_blob_name', 'lyrics_filename', '.txt', 'lyrics'),
+            'Session File Google Drive Link': ('session_blob_name', 'session_filename', '.zip', 'sessions'),
+            'Singer Agreement Google Drive Link': ('singer_agreement_blob_name', 'singer_agreement_filename', '.pdf', 'agreements'),
+            'Music Director Agreement Google Drive Link': ('music_director_agreement_blob_name', 'music_director_agreement_filename', '.pdf', 'agreements')
         }
         
-        for field_name, (path_key, filename_key, extension) in google_drive_fields.items():
+        for field_name, (blob_key, filename_key, extension, folder) in google_drive_fields.items():
             google_drive_url = str(row_data.get(field_name, '')).strip()
             if google_drive_url and google_drive_url.lower() != 'nan':
                 try:
-                    filename = f"{uuid.uuid4()}{extension}"
-                    file_path = await download_from_google_drive(google_drive_url, filename)
-                    file_paths[path_key] = file_path
-                    file_names[filename_key] = filename
+                    temp_filename = f"{uuid.uuid4()}{extension}"
+                    temp_file_path = await download_from_google_drive(google_drive_url, temp_filename)
+                    
+                    # Upload to GCS from the temporary file
+                    async with aiofiles.open(temp_file_path, 'rb') as f:
+                        content = await f.read()
+                        file = UploadFile(
+                            filename=temp_filename,
+                            file=BytesIO(content),
+                            content_type=mimetypes.guess_type(temp_filename)[0] or 'application/octet-stream'
+                        )
+                        blob_name = await upload_to_gcs(file, folder)
+                    
+                    # Store the blob name and original filename
+                    blob_names[blob_key] = blob_name
+                    file_names[filename_key] = temp_filename
+                    
+                    # Clean up temporary file
+                    try:
+                        os.remove(temp_file_path)
+                    except:
+                        pass
                 except Exception as e:
-                    return None, f"Error downloading {field_name}: {str(e)}"
+                    return None, f"Error processing {field_name}: {str(e)}"
         
         # Set managed_by for managers
         managed_by = None
@@ -706,8 +890,8 @@ async def process_bulk_upload_row(row_data, row_number, current_user):
             other_info=other_info,
             created_by=current_user.id,
             managed_by=managed_by,
-            **file_paths,
-            **file_names
+            **blob_names,  # Store GCS blob names
+            **file_names   # Store original filenames
         )
         
         track_dict = prepare_for_mongo(track.dict())
@@ -1232,81 +1416,23 @@ async def create_track(
     # Validate file sizes (500MB limit)
     max_size = 500 * 1024 * 1024  # 500MB in bytes
     
-    mp3_file_path = None
-    lyrics_file_path = None
-    session_file_path = None
-    singer_agreement_file_path = None
-    music_director_agreement_file_path = None
-    mp3_filename = None
-    lyrics_filename = None
-    session_filename = None
-    singer_agreement_filename = None
-    music_director_agreement_filename = None
-    
+    # These variables will hold the public URLs from GCS
+    mp3_url = None
+    lyrics_url = None
+    session_url = None
+    singer_agreement_url = None
+    music_director_agreement_url = None
+    # Upload each file to its designated folder in GCS
     if mp3_file:
-        if mp3_file.size > max_size:
-            raise HTTPException(status_code=413, detail="MP3 file too large. Maximum size is 500MB.")
-        
-        # Save MP3 file
-        file_extension = Path(mp3_file.filename).suffix
-        mp3_filename = f"{uuid.uuid4()}{file_extension}"
-        mp3_file_path = UPLOADS_DIR / mp3_filename
-        
-        async with aiofiles.open(mp3_file_path, 'wb') as f:
-            content = await mp3_file.read()
-            await f.write(content)
-    
+        mp3_url = await upload_to_gcs(mp3_file, "audio")
     if lyrics_file:
-        if lyrics_file.size > max_size:
-            raise HTTPException(status_code=413, detail="Lyrics file too large. Maximum size is 500MB.")
-        
-        # Save lyrics file
-        file_extension = Path(lyrics_file.filename).suffix
-        lyrics_filename = f"{uuid.uuid4()}{file_extension}"
-        lyrics_file_path = UPLOADS_DIR / lyrics_filename
-        
-        async with aiofiles.open(lyrics_file_path, 'wb') as f:
-            content = await lyrics_file.read()
-            await f.write(content)
-    
+        lyrics_url = await upload_to_gcs(lyrics_file, "lyrics")
     if session_file:
-        if session_file.size > max_size:
-            raise HTTPException(status_code=413, detail="Session file too large. Maximum size is 500MB.")
-        
-        # Save session file
-        file_extension = Path(session_file.filename).suffix
-        session_filename = f"{uuid.uuid4()}{file_extension}"
-        session_file_path = UPLOADS_DIR / session_filename
-        
-        async with aiofiles.open(session_file_path, 'wb') as f:
-            content = await session_file.read()
-            await f.write(content)
-    
+        session_url = await upload_to_gcs(session_file, "sessions")
     if singer_agreement_file:
-        if singer_agreement_file.size > max_size:
-            raise HTTPException(status_code=413, detail="Singer agreement file too large. Maximum size is 500MB.")
-        
-        # Save singer agreement file
-        file_extension = Path(singer_agreement_file.filename).suffix
-        singer_agreement_filename = f"{uuid.uuid4()}{file_extension}"
-        singer_agreement_file_path = UPLOADS_DIR / singer_agreement_filename
-        
-        async with aiofiles.open(singer_agreement_file_path, 'wb') as f:
-            content = await singer_agreement_file.read()
-            await f.write(content)
-    
+        singer_agreement_url = await upload_to_gcs(singer_agreement_file, "agreements")
     if music_director_agreement_file:
-        if music_director_agreement_file.size > max_size:
-            raise HTTPException(status_code=413, detail="Music director agreement file too large. Maximum size is 500MB.")
-        
-        # Save music director agreement file
-        file_extension = Path(music_director_agreement_file.filename).suffix
-        music_director_agreement_filename = f"{uuid.uuid4()}{file_extension}"
-        music_director_agreement_file_path = UPLOADS_DIR / music_director_agreement_filename
-        
-        async with aiofiles.open(music_director_agreement_file_path, 'wb') as f:
-            content = await music_director_agreement_file.read()
-            await f.write(content)
+        music_director_agreement_url = await upload_to_gcs(music_director_agreement_file, "agreements")
     
     # For managers, validate that they're uploading in their assigned language
     if current_user.user_type == "manager" and current_user.manager_id:
@@ -1338,16 +1464,17 @@ async def create_track(
         release_date=release_date,
         album_name=album_name,
         other_info=other_info,
-        mp3_file_path=str(mp3_file_path) if mp3_file_path else None,
-        lyrics_file_path=str(lyrics_file_path) if lyrics_file_path else None,
-        session_file_path=str(session_file_path) if session_file_path else None,
-        singer_agreement_file_path=str(singer_agreement_file_path) if singer_agreement_file_path else None,
-        music_director_agreement_file_path=str(music_director_agreement_file_path) if music_director_agreement_file_path else None,
-        mp3_filename=mp3_filename,
-        lyrics_filename=lyrics_filename,
-        session_filename=session_filename,
-        singer_agreement_filename=singer_agreement_filename,
-        music_director_agreement_filename=music_director_agreement_filename,
+        mp3_file_path=mp3_url,
+        lyrics_file_path=lyrics_url,
+        session_file_path=session_url,
+        singer_agreement_file_path=singer_agreement_url,
+        music_director_agreement_file_path=music_director_agreement_url,
+        # We can store the original filenames for user convenience
+        mp3_filename=mp3_file.filename if mp3_file else None,
+        lyrics_filename=lyrics_file.filename if lyrics_file else None,
+        session_filename=session_file.filename if session_file else None,
+        singer_agreement_filename=singer_agreement_file.filename if singer_agreement_file else None,
+        music_director_agreement_filename=music_director_agreement_file.filename if music_director_agreement_file else None,
         created_by=current_user.id,
         managed_by=managed_by
     )
@@ -1407,12 +1534,38 @@ async def get_tracks(
     tracks = await db.tracks.find(query).to_list(1000)
     return [MusicTrack(**parse_from_mongo(track)) for track in tracks]
 
-@api_router.get("/tracks/{track_id}", response_model=MusicTrack)
-async def get_track(track_id: str, current_user: User = Depends(get_current_user)):
+# REPLACE THE ENTIRE delete_track FUNCTION WITH THIS
+@api_router.delete("/tracks/{track_id}")
+async def delete_track(track_id: str, current_user: User = Depends(get_current_user)):
+    # Step 1: Find the track metadata in MongoDB
     track = await db.tracks.find_one({"id": track_id})
     if not track:
         raise HTTPException(status_code=404, detail="Track not found")
-    return MusicTrack(**parse_from_mongo(track))
+
+    # Step 2: Authorization (This logic remains unchanged)
+    if current_user.user_type == "manager":
+        if track.get("created_by") != current_user.id and track.get("managed_by") != current_user.manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized to delete this track")
+
+    # Step 3: Delete all associated files from Google Cloud Storage
+    blob_name_fields = [
+        "mp3_blob_name",
+        "lyrics_blob_name",
+        "session_blob_name",
+        "singer_agreement_blob_name",
+        "music_director_agreement_blob_name"
+    ]
+
+    # Delete GCS blobs
+    for field in blob_name_fields:
+        blob_name = track.get(field)
+        if blob_name:
+            await delete_from_gcs(blob_name)
+
+    # Step 4: After deleting files, delete the record from MongoDB
+    await db.tracks.delete_one({"id": track_id})
+    
+    return {"message": "Track and associated files deleted successfully"}
 
 @api_router.get("/tracks/next-code/{full_prefix}")
 async def get_next_unique_code(full_prefix: str, current_user: User = Depends(get_current_user)):
@@ -1493,37 +1646,7 @@ async def update_track(
     updated_track = await db.tracks.find_one({"id": track_id})
     return MusicTrack(**parse_from_mongo(updated_track))
 
-@api_router.delete("/tracks/{track_id}")
-async def delete_track(track_id: str, current_user: User = Depends(get_current_user)):
-    track = await db.tracks.find_one({"id": track_id})
-    if not track:
-        raise HTTPException(status_code=404, detail="Track not found")
-    
-    # Authorization: Admins can delete any track, Managers can only delete their own tracks
-    if current_user.user_type == "manager":
-        if track["created_by"] != current_user.id and track.get("managed_by") != current_user.manager_id:
-            raise HTTPException(status_code=403, detail="Not authorized to delete this track")
-    # Admins can delete any track (no additional check needed)
-    
-    # Delete files
-    if track.get("mp3_file_path") and Path(track["mp3_file_path"]).exists():
-        Path(track["mp3_file_path"]).unlink()
-    
-    if track.get("lyrics_file_path") and Path(track["lyrics_file_path"]).exists():
-        Path(track["lyrics_file_path"]).unlink()
-    
-    if track.get("session_file_path") and Path(track["session_file_path"]).exists():
-        Path(track["session_file_path"]).unlink()
-    
-    if track.get("singer_agreement_file_path") and Path(track["singer_agreement_file_path"]).exists():
-        Path(track["singer_agreement_file_path"]).unlink()
-    
-    if track.get("music_director_agreement_file_path") and Path(track["music_director_agreement_file_path"]).exists():
-        Path(track["music_director_agreement_file_path"]).unlink()
-    
-    await db.tracks.delete_one({"id": track_id})
-    return {"message": "Track deleted successfully"}
-
+# (obsolete code removed)
 @api_router.get("/tracks/bulk-upload/template")
 async def download_bulk_upload_template(current_user: User = Depends(get_current_user)):
     """Download Excel template for bulk upload"""
@@ -1620,60 +1743,90 @@ async def get_lyrics_content(
     if not track:
         raise HTTPException(status_code=404, detail="Track not found")
     
-    lyrics_file_path = track.get("lyrics_file_path")
-    if not lyrics_file_path or not Path(lyrics_file_path).exists():
+    lyrics_blob_name = track.get("lyrics_blob_name")
+    if not lyrics_blob_name:
         raise HTTPException(status_code=404, detail="Lyrics file not found")
     
     try:
-        # Read the lyrics file content
-        async with aiofiles.open(lyrics_file_path, 'r', encoding='utf-8') as f:
-            content = await f.read()
+        # Read the lyrics content from GCS
+        content = await read_gcs_text(lyrics_blob_name)
         return {"content": content, "filename": track.get("lyrics_filename", "lyrics.txt")}
     except Exception as e:
-        # Try reading with different encoding if utf-8 fails
-        try:
-            async with aiofiles.open(lyrics_file_path, 'r', encoding='latin1') as f:
-                content = await f.read()
-            return {"content": content, "filename": track.get("lyrics_filename", "lyrics.txt")}
-        except:
-            raise HTTPException(status_code=500, detail="Could not read lyrics file")
+        logger.exception(f"Failed to read lyrics from GCS blob: {lyrics_blob_name}")
+        raise HTTPException(status_code=500, detail="Could not read lyrics file")
 
 @api_router.get("/tracks/{track_id}/download/{file_type}")
 async def download_file(
     track_id: str,
     file_type: str,  # 'mp3', 'lyrics', 'session', 'singer_agreement', 'music_director_agreement'
+    stream: bool = False,
     current_user: User = Depends(get_current_user)
 ):
     track = await db.tracks.find_one({"id": track_id})
     if not track:
         raise HTTPException(status_code=404, detail="Track not found")
     
-    if file_type == "mp3":
-        file_path = track.get("mp3_file_path")
-        filename = track.get("mp3_filename", "audio.mp3")
-    elif file_type == "lyrics":
-        file_path = track.get("lyrics_file_path")
-        filename = track.get("lyrics_filename", "lyrics.txt")
-    elif file_type == "session":
-        file_path = track.get("session_file_path")
-        filename = track.get("session_filename", "session_file")
-    elif file_type == "singer_agreement":
-        file_path = track.get("singer_agreement_file_path")
-        filename = track.get("singer_agreement_filename", "singer_agreement.pdf")
-    elif file_type == "music_director_agreement":
-        file_path = track.get("music_director_agreement_file_path")
-        filename = track.get("music_director_agreement_filename", "music_director_agreement.pdf")
-    else:
+    # Map file types to their corresponding blob name and filename fields
+    file_type_mapping = {
+        "mp3": ("mp3_blob_name", "mp3_filename", "audio.mp3"),
+        "lyrics": ("lyrics_blob_name", "lyrics_filename", "lyrics.txt"),
+        "session": ("session_blob_name", "session_filename", "session_file"),
+        "singer_agreement": ("singer_agreement_blob_name", "singer_agreement_filename", "singer_agreement.pdf"),
+        "music_director_agreement": ("music_director_agreement_blob_name", "music_director_agreement_filename", "music_director_agreement.pdf")
+    }
+    
+    if file_type not in file_type_mapping:
         raise HTTPException(status_code=400, detail="Invalid file type")
     
-    if not file_path or not Path(file_path).exists():
+    blob_name_field, filename_field, default_filename = file_type_mapping[file_type]
+    blob_name = track.get(blob_name_field)
+    filename = track.get(filename_field, default_filename)
+    
+    if not blob_name:
         raise HTTPException(status_code=404, detail="File not found")
     
-    return FileResponse(
-        path=file_path,
-        filename=f"{track['unique_code']}_{track['title']}_{filename}",
-        media_type='application/octet-stream'
-    )
+    try:
+        if stream:
+            # Stream the file content directly from GCS
+            bucket = storage_client.bucket(GCS_BUCKET_NAME)
+            blob = bucket.blob(blob_name)
+            
+            # Define a generator function to stream the content in chunks
+            async def content_stream():
+                try:
+                    # Use download_to_file with a temporary file to enable chunked streaming
+                    chunk_size = 1024 * 1024  # 1MB chunks
+                    # Use blob.download_as_bytes() with start/end for chunked download
+                    total_bytes = blob.size
+                    position = 0
+                    
+                    while position < total_bytes:
+                        end = min(position + chunk_size, total_bytes)
+                        chunk = await asyncio.to_thread(
+                            blob.download_as_bytes,
+                            start=position,
+                            end=end - 1
+                        )
+                        yield chunk
+                        position = end
+                except Exception as e:
+                    logger.exception(f"Failed to stream content from blob {blob_name}")
+                    raise HTTPException(status_code=500, detail=f"Failed to stream file content: {str(e)}") from e
+            
+            headers = {
+                'Content-Disposition': f'attachment; filename="{track["unique_code"]}_{track["title"]}_{filename}"'
+            }
+            return StreamingResponse(content_stream(), headers=headers, media_type='application/octet-stream')
+        else:
+            # Generate a signed URL for the file
+            signed_url = await generate_signed_url(blob_name)
+            return RedirectResponse(url=signed_url)
+            
+    except NotFound:
+        raise HTTPException(status_code=404, detail="File not found in storage")
+    except Exception as e:
+        logger.exception(f"Failed to handle file download for blob: {blob_name}")
+        raise HTTPException(status_code=500, detail=f"Could not process file download: {str(e)}")
 
 # Include the router in the main app
 app.include_router(api_router)
