@@ -1,7 +1,8 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Form, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, RedirectResponse, StreamingResponse
+from io import BytesIO
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -150,6 +151,13 @@ class MusicTrack(BaseModel):
     release_date: Optional[str] = None
     album_name: Optional[str] = None
     other_info: Optional[str] = None
+    # GCS blob names for file storage
+    mp3_blob_name: Optional[str] = None
+    lyrics_blob_name: Optional[str] = None
+    session_blob_name: Optional[str] = None
+    singer_agreement_blob_name: Optional[str] = None
+    music_director_agreement_blob_name: Optional[str] = None
+    # Legacy file paths - to be removed after migration
     mp3_file_path: Optional[str] = None
     lyrics_file_path: Optional[str] = None
     session_file_path: Optional[str] = None
@@ -576,7 +584,7 @@ import asyncio
 
 async def upload_to_gcs(file: UploadFile, folder: str) -> str:
     """
-    Uploads a file to a specified folder in the GCS bucket and returns its public URL.
+    Uploads a file to a specified folder in the GCS bucket and returns its blob name.
     """
     if not GCS_BUCKET_NAME:
         raise HTTPException(status_code=500, detail="GCS bucket name is not configured.")
@@ -600,15 +608,65 @@ async def upload_to_gcs(file: UploadFile, folder: str) -> str:
         logger.exception(f"Failed to upload {file.filename} to GCS")
         raise HTTPException(status_code=500, detail=f"Could not upload file: {e}") from e
     
-    return blob.public_url
-# ADD THIS SECOND NEW HELPER FUNCTION
-async def delete_from_gcs(public_url: str):
+    return blob_name
+
+async def generate_signed_url(blob_name: str, expiration_minutes: int = 60) -> str:
     """
-    Parses a public GCS URL to find the blob name and deletes the file from the bucket.
+    Generate a signed URL for a GCS blob with configurable expiration time.
     """
-    if not GCS_BUCKET_NAME or not public_url:
-        logger.warning("GCS_BUCKET_NAME not configured or no public_url provided. Skipping deletion.")
+    if not GCS_BUCKET_NAME or not blob_name:
+        raise HTTPException(status_code=500, detail="GCS bucket name or blob name not configured.")
+    
+    try:
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_name)
+        
+        # Generate signed URL that expires in specified minutes
+        url = await asyncio.to_thread(
+            blob.generate_signed_url,
+            expiration=datetime.timedelta(minutes=expiration_minutes),
+            method="GET",
+            version="v4"
+        )
+        return url
+    except Exception as e:
+        logger.exception(f"Failed to generate signed URL for blob: {blob_name}")
+        raise HTTPException(status_code=500, detail=f"Could not generate signed URL: {e}") from e
+
+async def read_gcs_text(blob_name: str) -> str:
+    """
+    Read text content from a GCS blob.
+    """
+    if not GCS_BUCKET_NAME or not blob_name:
+        raise HTTPException(status_code=500, detail="GCS bucket name or blob name not configured.")
+    
+    try:
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_name)
+        
+        # Download the blob content as text using a thread to avoid blocking
+        content = await asyncio.to_thread(blob.download_as_text)
+        return content
+    except Exception as e:
+        logger.exception(f"Failed to read text from blob: {blob_name}")
+        raise HTTPException(status_code=500, detail=f"Could not read file content: {e}") from e
+# DELETE helper for GCS
+async def delete_from_gcs(blob_name: str):
+    """
+    Deletes a file from the GCS bucket using its blob name.
+    """
+    if not GCS_BUCKET_NAME or not blob_name:
+        logger.warning("GCS_BUCKET_NAME not configured or no blob_name provided. Skipping deletion.")
         return
+
+    try:
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_name)
+        await asyncio.to_thread(blob.delete)
+        logger.info(f"Successfully deleted blob: {blob_name}")
+    except Exception as e:
+        logger.exception(f"Failed to delete blob: {blob_name}")
+        # Don't raise an exception here as this is often called during cleanup
 
     # The expected URL format is: https://storage.googleapis.com/BUCKET_NAME/BLOB_NAME
     # We need to extract the BLOB_NAME.
@@ -731,28 +789,46 @@ async def process_bulk_upload_row(row_data, row_number, current_user):
         
         serial_number = f"{serial_prefix}{next_serial_number:04d}"
         
-        # Handle file downloads from Google Drive
-        file_paths = {}
+        # Handle file downloads from Google Drive and upload to GCS
+        blob_names = {}
         file_names = {}
         
         google_drive_fields = {
-            'Audio File Google Drive Link': ('mp3_file_path', 'mp3_filename', '.mp3'),
-            'Lyrics File Google Drive Link': ('lyrics_file_path', 'lyrics_filename', '.txt'),
-            'Session File Google Drive Link': ('session_file_path', 'session_filename', '.zip'),
-            'Singer Agreement Google Drive Link': ('singer_agreement_file_path', 'singer_agreement_filename', '.pdf'),
-            'Music Director Agreement Google Drive Link': ('music_director_agreement_file_path', 'music_director_agreement_filename', '.pdf')
+            'Audio File Google Drive Link': ('mp3_blob_name', 'mp3_filename', '.mp3', 'audio'),
+            'Lyrics File Google Drive Link': ('lyrics_blob_name', 'lyrics_filename', '.txt', 'lyrics'),
+            'Session File Google Drive Link': ('session_blob_name', 'session_filename', '.zip', 'sessions'),
+            'Singer Agreement Google Drive Link': ('singer_agreement_blob_name', 'singer_agreement_filename', '.pdf', 'agreements'),
+            'Music Director Agreement Google Drive Link': ('music_director_agreement_blob_name', 'music_director_agreement_filename', '.pdf', 'agreements')
         }
         
-        for field_name, (path_key, filename_key, extension) in google_drive_fields.items():
+        for field_name, (blob_key, filename_key, extension, folder) in google_drive_fields.items():
             google_drive_url = str(row_data.get(field_name, '')).strip()
             if google_drive_url and google_drive_url.lower() != 'nan':
                 try:
-                    filename = f"{uuid.uuid4()}{extension}"
-                    file_path = await download_from_google_drive(google_drive_url, filename)
-                    file_paths[path_key] = file_path
-                    file_names[filename_key] = filename
+                    temp_filename = f"{uuid.uuid4()}{extension}"
+                    temp_file_path = await download_from_google_drive(google_drive_url, temp_filename)
+                    
+                    # Upload to GCS from the temporary file
+                    async with aiofiles.open(temp_file_path, 'rb') as f:
+                        content = await f.read()
+                        file = UploadFile(
+                            filename=temp_filename,
+                            file=BytesIO(content),
+                            content_type=mimetypes.guess_type(temp_filename)[0] or 'application/octet-stream'
+                        )
+                        blob_name = await upload_to_gcs(file, folder)
+                    
+                    # Store the blob name and original filename
+                    blob_names[blob_key] = blob_name
+                    file_names[filename_key] = temp_filename
+                    
+                    # Clean up temporary file
+                    try:
+                        os.remove(temp_file_path)
+                    except:
+                        pass
                 except Exception as e:
-                    return None, f"Error downloading {field_name}: {str(e)}"
+                    return None, f"Error processing {field_name}: {str(e)}"
         
         # Set managed_by for managers
         managed_by = None
@@ -777,8 +853,8 @@ async def process_bulk_upload_row(row_data, row_number, current_user):
             other_info=other_info,
             created_by=current_user.id,
             managed_by=managed_by,
-            **file_paths,
-            **file_names
+            **blob_names,  # Store GCS blob names
+            **file_names   # Store original filenames
         )
         
         track_dict = prepare_for_mongo(track.dict())
@@ -1659,60 +1735,81 @@ async def get_lyrics_content(
     if not track:
         raise HTTPException(status_code=404, detail="Track not found")
     
-    lyrics_file_path = track.get("lyrics_file_path")
-    if not lyrics_file_path or not Path(lyrics_file_path).exists():
+    lyrics_blob_name = track.get("lyrics_blob_name")
+    if not lyrics_blob_name:
         raise HTTPException(status_code=404, detail="Lyrics file not found")
     
     try:
-        # Read the lyrics file content
-        async with aiofiles.open(lyrics_file_path, 'r', encoding='utf-8') as f:
-            content = await f.read()
+        # Read the lyrics content from GCS
+        content = await read_gcs_text(lyrics_blob_name)
         return {"content": content, "filename": track.get("lyrics_filename", "lyrics.txt")}
     except Exception as e:
-        # Try reading with different encoding if utf-8 fails
-        try:
-            async with aiofiles.open(lyrics_file_path, 'r', encoding='latin1') as f:
-                content = await f.read()
-            return {"content": content, "filename": track.get("lyrics_filename", "lyrics.txt")}
-        except:
-            raise HTTPException(status_code=500, detail="Could not read lyrics file")
+        logger.exception(f"Failed to read lyrics from GCS blob: {lyrics_blob_name}")
+        raise HTTPException(status_code=500, detail="Could not read lyrics file")
+
+from fastapi.responses import RedirectResponse, StreamingResponse
+from google.cloud.exceptions import NotFound
 
 @api_router.get("/tracks/{track_id}/download/{file_type}")
 async def download_file(
     track_id: str,
     file_type: str,  # 'mp3', 'lyrics', 'session', 'singer_agreement', 'music_director_agreement'
+    stream: bool = False,
     current_user: User = Depends(get_current_user)
 ):
     track = await db.tracks.find_one({"id": track_id})
     if not track:
         raise HTTPException(status_code=404, detail="Track not found")
     
-    if file_type == "mp3":
-        file_path = track.get("mp3_file_path")
-        filename = track.get("mp3_filename", "audio.mp3")
-    elif file_type == "lyrics":
-        file_path = track.get("lyrics_file_path")
-        filename = track.get("lyrics_filename", "lyrics.txt")
-    elif file_type == "session":
-        file_path = track.get("session_file_path")
-        filename = track.get("session_filename", "session_file")
-    elif file_type == "singer_agreement":
-        file_path = track.get("singer_agreement_file_path")
-        filename = track.get("singer_agreement_filename", "singer_agreement.pdf")
-    elif file_type == "music_director_agreement":
-        file_path = track.get("music_director_agreement_file_path")
-        filename = track.get("music_director_agreement_filename", "music_director_agreement.pdf")
-    else:
+    # Map file types to their corresponding blob name and filename fields
+    file_type_mapping = {
+        "mp3": ("mp3_blob_name", "mp3_filename", "audio.mp3"),
+        "lyrics": ("lyrics_blob_name", "lyrics_filename", "lyrics.txt"),
+        "session": ("session_blob_name", "session_filename", "session_file"),
+        "singer_agreement": ("singer_agreement_blob_name", "singer_agreement_filename", "singer_agreement.pdf"),
+        "music_director_agreement": ("music_director_agreement_blob_name", "music_director_agreement_filename", "music_director_agreement.pdf")
+    }
+    
+    if file_type not in file_type_mapping:
         raise HTTPException(status_code=400, detail="Invalid file type")
     
-    if not file_path or not Path(file_path).exists():
+    blob_name_field, filename_field, default_filename = file_type_mapping[file_type]
+    blob_name = track.get(blob_name_field)
+    filename = track.get(filename_field, default_filename)
+    
+    if not blob_name:
         raise HTTPException(status_code=404, detail="File not found")
     
-    return FileResponse(
-        path=file_path,
-        filename=f"{track['unique_code']}_{track['title']}_{filename}",
-        media_type='application/octet-stream'
-    )
+    try:
+        if stream:
+            # Stream the file content directly from GCS
+            bucket = storage_client.bucket(GCS_BUCKET_NAME)
+            blob = bucket.blob(blob_name)
+            
+            # Define a generator function to stream the content
+            async def content_stream():
+                try:
+                    # Download in chunks to avoid memory issues with large files
+                    content = await asyncio.to_thread(blob.download_as_bytes)
+                    yield content
+                except Exception as e:
+                    logger.exception(f"Failed to stream content from blob: {blob_name}")
+                    raise HTTPException(status_code=500, detail="Failed to stream file content")
+            
+            headers = {
+                'Content-Disposition': f'attachment; filename="{track["unique_code"]}_{track["title"]}_{filename}"'
+            }
+            return StreamingResponse(content_stream(), headers=headers, media_type='application/octet-stream')
+        else:
+            # Generate a signed URL for the file
+            signed_url = await generate_signed_url(blob_name)
+            return RedirectResponse(url=signed_url)
+            
+    except NotFound:
+        raise HTTPException(status_code=404, detail="File not found in storage")
+    except Exception as e:
+        logger.exception(f"Failed to handle file download for blob: {blob_name}")
+        raise HTTPException(status_code=500, detail=f"Could not process file download: {str(e)}")
 
 # Include the router in the main app
 app.include_router(api_router)
