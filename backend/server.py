@@ -44,13 +44,11 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
 # Configure logging (moved before GCS initialization)
-import logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
 # --- Google Cloud Storage (GCS) Connection ---
 # This environment variable will be injected from Secret Manager by our CI/CD pipeline.
 GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME')
