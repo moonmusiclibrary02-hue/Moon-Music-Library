@@ -659,7 +659,7 @@ async def generate_signed_url(blob_name: str, expiration_minutes: int = 60) -> s
         # Generate signed URL that expires in specified minutes
         url = await asyncio.to_thread(
             blob.generate_signed_url,
-            expiration=datetime.timedelta(minutes=expiration_minutes),
+            expiration=timedelta(minutes=expiration_minutes),
             method="GET",
             version="v4"
         )
@@ -667,7 +667,6 @@ async def generate_signed_url(blob_name: str, expiration_minutes: int = 60) -> s
     except Exception as e:
         logger.exception(f"Failed to generate signed URL for blob: {blob_name}")
         raise HTTPException(status_code=500, detail=f"Could not generate signed URL: {e}") from e
-
 async def read_gcs_text(blob_name: str) -> str:
     """
     Read text content from a GCS blob.
