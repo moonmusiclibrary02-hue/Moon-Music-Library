@@ -1306,14 +1306,9 @@ async def create_track(
     # These variables will hold the public URLs from GCS
     mp3_url = None
     lyrics_url = None
-    
-    # These variables will hold the public URLs from GCS
-    mp3_url = None
-    lyrics_url = None
     session_url = None
     singer_agreement_url = None
     music_director_agreement_url = None
-
     # Upload each file to its designated folder in GCS
     if mp3_file:
         mp3_url = await upload_to_gcs(mp3_file, "audio")
