@@ -478,7 +478,18 @@ async def download_from_google_drive(url, filename):
         raise ValueError(f"Failed to download file from Google Drive: {str(e)}")
 
 def generate_excel_template():
-    """Generate Excel template for bulk upload"""
+    """
+    Create an Excel workbook preformatted for bulk track upload.
+    
+    The workbook contains two sheets:
+    - "Bulk Track Upload": header row for required and optional track fields and a sample data row.
+    - "Instructions": step-by-step guidance on required fields, allowed values, Google Drive link requirements, and supported file types.
+    
+    Column widths are adjusted for readability.
+    
+    Returns:
+        workbook (Workbook): An openpyxl Workbook object representing the template.
+    """
     wb = Workbook()
     ws = wb.active
     ws.title = "Bulk Track Upload"
@@ -570,7 +581,19 @@ import asyncio
 
 async def upload_to_gcs(file: UploadFile, folder: str) -> str:
     """
-    Uploads a file to a specified folder in the GCS bucket and returns its public URL.
+    Upload an incoming UploadFile to the configured Google Cloud Storage bucket under the specified folder.
+    
+    The stored object name is made unique to avoid collisions; the function returns the uploaded object's public URL.
+    
+    Parameters:
+        file (UploadFile): The uploaded file to store.
+        folder (str): Destination folder path inside the GCS bucket (no leading slash required).
+    
+    Returns:
+        str: Public URL of the uploaded object.
+    
+    Raises:
+        HTTPException: Status 500 if the GCS bucket is not configured or the upload fails.
     """
     if not GCS_BUCKET_NAME:
         raise HTTPException(status_code=500, detail="GCS bucket name is not configured.")
@@ -598,7 +621,12 @@ async def upload_to_gcs(file: UploadFile, folder: str) -> str:
 # ADD THIS SECOND NEW HELPER FUNCTION
 async def delete_from_gcs(public_url: str):
     """
-    Parses a public GCS URL to find the blob name and deletes the file from the bucket.
+    Delete a file from the configured Google Cloud Storage bucket given its public URL.
+    
+    Parses the provided public GCS URL (expected form "https://storage.googleapis.com/{BUCKET_NAME}/{BLOB_NAME}"), determines the blob path, and deletes the blob from the configured bucket if it exists. If the bucket name is not configured, the URL does not match the expected format, or deletion fails, the function logs the condition and returns without raising an exception so callers can continue with related cleanup (e.g., database record removal).
+    
+    Parameters:
+        public_url (str): The public URL of the GCS object to delete.
     """
     if not GCS_BUCKET_NAME or not public_url:
         logger.warning("GCS_BUCKET_NAME not configured or no public_url provided. Skipping deletion.")
@@ -629,7 +657,23 @@ async def delete_from_gcs(public_url: str):
         # deleting the database record even if the file deletion fails.
 
 async def process_bulk_upload_row(row_data, row_number, current_user):
-    """Process a single row from bulk upload Excel"""
+    """
+    Process a single Excel row to validate inputs, optionally download referenced files, generate identifiers, and insert a MusicTrack record into the database.
+    
+    Parameters:
+        row_data (dict): Mapping of Excel column names to values for the row. Expected keys include required fields like 'Title*', 'Music Composer*', 'Lyricist*', 'Singer Name*', 'Audio Language*', 'Rights Type*' and optional Google Drive link fields for asset files.
+        row_number (int): One-based index of the row in the uploaded sheet (used for error reporting).
+        current_user (User): The user performing the upload; used to enforce manager language restrictions and to set the managed_by/created_by fields.
+    
+    Returns:
+        tuple:
+            track_id (str | None): The newly created track's id when successful, otherwise None.
+            error_message (str | None): An error message describing why processing failed, or None on success.
+    
+    Notes:
+        - If the row contains Google Drive links for assets, the function may download those files and include their paths and filenames in the stored record.
+        - Validation failures, permission violations (e.g., manager language mismatch), or download errors are returned as an error_message; unexpected internal errors are also returned as error_message and logged.
+    """
     try:
         # Extract data from row
         title = str(row_data.get('Title*', '')).strip()
@@ -1214,6 +1258,20 @@ async def create_track(
     current_user: User = Depends(get_current_user)
 ):
     # Validate rights type and track category
+    """
+    Create a new music track record from submitted form data, upload any provided media/agreement files to Google Cloud Storage, validate inputs (rights type, track category, rights details, manager language constraint, and file size), auto-generate a unique_code and serial_number when not provided, persist the track to the database, and return the created track model.
+    
+    Validations and effects:
+    - Enforces rights_type to be "original" or "multi_rights"; enforces track_category rules for each rights_type.
+    - Validates rights_details when provided.
+    - Ensures managers may only upload tracks in their assigned language and automatically sets managed_by for manager uploads.
+    - Uploads provided files (audio, lyrics, session, agreements) to designated GCS folders and stores their public URLs and original filenames on the track record.
+    - Auto-generates a language-prefixed unique_code and a serial_number if not supplied, ensuring uniqueness against existing records.
+    - Persists the created MusicTrack document in the database.
+    
+    Returns:
+        The created MusicTrack instance.
+    """
     if rights_type not in ["original", "multi_rights"]:
         raise HTTPException(status_code=400, detail="Rights type must be 'original' or 'multi_rights'")
     
@@ -1379,6 +1437,21 @@ async def get_tracks(
     language: Optional[str] = None,
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Retrieve tracks that match optional filter criteria and enforce role-based visibility.
+    
+    Filters (search, composer, singer, album, language) perform case-insensitive partial matches against their respective fields. If the caller is a manager, results are restricted to tracks the manager created or that are assigned to them.
+    
+    Parameters:
+        search (Optional[str]): Partial text to match against unique_code, title, music_composer, singer_name, or album_name.
+        composer (Optional[str]): Partial match against the `music_composer` field.
+        singer (Optional[str]): Partial match against the `singer_name` field.
+        album (Optional[str]): Partial match against the `album_name` field.
+        language (Optional[str]): Partial match against the `audio_language` field.
+    
+    Returns:
+        List[MusicTrack]: A list of tracks converted from database documents to `MusicTrack` models.
+    """
     query = {}
     
     # Role-based filtering: Managers can only see their own tracks
@@ -1424,6 +1497,25 @@ async def get_tracks(
 @api_router.delete("/tracks/{track_id}")
 async def delete_track(track_id: str, current_user: User = Depends(get_current_user)):
     # Step 1: Find the track metadata in MongoDB
+    """
+    Delete a music track along with its associated files from Google Cloud Storage and remove the track record from the database.
+    
+    This operation:
+    - Verifies the track exists.
+    - Enforces manager authorization (managers may delete only their own or managed tracks).
+    - Deletes any stored files referenced by the track (audio, lyrics, session, and agreement files) via delete_from_gcs.
+    - Removes the track document from MongoDB.
+    
+    Parameters:
+        track_id (str): The unique identifier of the track to delete.
+    
+    Returns:
+        dict: A message confirming successful deletion, e.g. {"message": "Track and associated files deleted successfully"}.
+    
+    Raises:
+        HTTPException: 404 if the track is not found.
+        HTTPException: 403 if the current user is not authorized to delete the track.
+    """
     track = await db.tracks.find_one({"id": track_id})
     if not track:
         raise HTTPException(status_code=404, detail="Track not found")
@@ -1454,7 +1546,18 @@ async def delete_track(track_id: str, current_user: User = Depends(get_current_u
 
 @api_router.get("/tracks/next-code/{full_prefix}")
 async def get_next_unique_code(full_prefix: str, current_user: User = Depends(get_current_user)):
-    """Generate the next available unique code for the given language-prefix combination"""
+    """
+    Generate the next available unique track code for a given language-prefix combination.
+    
+    Parameters:
+        full_prefix (str): Combined language and rights prefix in the format "LANG-PREFIX" (e.g., "ENG-MR", "TEL-OCC").
+    
+    Returns:
+        dict: A mapping with key `unique_code` containing the next available code formatted as `LANG-PREFIXNNNN` (4-digit zero-padded number).
+    
+    Raises:
+        HTTPException: If `full_prefix` is malformed, the language code is not three letters, the prefix is invalid, or other validation failures occur.
+    """
     
     # Parse the full prefix (e.g., "ENG-MR", "TEL-OCC", "HIN-OCW")
     if '-' not in full_prefix:
