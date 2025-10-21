@@ -180,7 +180,11 @@ const UploadTrack = ({ apiClient }) => {
       const maxSize = 500 * 1024 * 1024; // 500MB
       if (file.size > maxSize) {
         console.log('File too large:', file.size);
-        toast.error('File too large. Maximum size is 500MB.');
+        toast({
+          title: "File too large",
+          description: "Maximum size is 500MB.",
+          variant: "destructive"
+        });
         return;
       }
       
@@ -188,7 +192,11 @@ const UploadTrack = ({ apiClient }) => {
       if (fileType === 'mp3_file') {
         if (!file.type.startsWith('audio/')) {
           console.log('Invalid audio file type:', file.type);
-          toast.error('Please select a valid audio file.');
+          toast({
+            title: "Invalid file type",
+            description: "Please select a valid audio file.",
+            variant: "destructive"
+          });
           return;
         }
       }
@@ -203,7 +211,11 @@ const UploadTrack = ({ apiClient }) => {
         
         if (!allowedTypes.includes(file.type) && !allowedExtensions.includes(fileExtension)) {
           console.log('Invalid session file type:', file.type, fileExtension);
-          toast.error('Please select a valid session file (ZIP or RAR only).');
+          toast({
+            title: "Invalid file type",
+            description: "Please select a valid session file (ZIP or RAR only).",
+            variant: "destructive"
+          });
           return;
         }
       }
@@ -229,7 +241,11 @@ const UploadTrack = ({ apiClient }) => {
         
         if (!allowedTypes.includes(file.type) && !allowedExtensions.includes(fileExtension)) {
           console.log('Invalid agreement file type:', file.type, fileExtension);
-          toast.error('Please select a valid document or image file (PDF, DOC, DOCX, TXT, JPG, PNG, WEBP, GIF).');
+          toast({
+            title: "Invalid file type",
+            description: "Please select a valid document or image file (PDF, DOC, DOCX, TXT, JPG, PNG, WEBP, GIF).",
+            variant: "destructive"
+          });
           return;
         }
       }
@@ -246,7 +262,10 @@ const UploadTrack = ({ apiClient }) => {
                             fileType === 'lyrics_file' ? 'Lyrics' :
                             fileType === 'singer_agreement_file' ? 'Singer Agreement' :
                             fileType === 'music_director_agreement_file' ? 'Music Director Agreement' : 'File';
-      toast.success(`${fileTypeLabel} file selected: ${file.name}`);
+      toast({
+        title: "File selected",
+        description: `${fileTypeLabel} file: ${file.name}`,
+      });
     } else {
       console.log('No file selected');
     }
@@ -372,7 +391,10 @@ const UploadTrack = ({ apiClient }) => {
       // Clean up any previous incomplete uploads before starting (use ref for sync access)
       const existingBlobs = Object.values(uploadedBlobsRef.current).filter(Boolean);
       if (existingBlobs.length > 0) {
-        toast.info('Cleaning up previous upload attempt...');
+        toast({
+          title: "Cleaning up",
+          description: "Cleaning up previous upload attempt...",
+        });
         await cleanupBlobs(existingBlobs);
       }
       
@@ -522,11 +544,14 @@ const UploadTrack = ({ apiClient }) => {
         }
       });
 
-      toast.success('Track uploaded successfully!');
+      toast({
+        title: "Success",
+        description: "Track uploaded successfully!",
+      });
       navigate('/');
     } catch (error) {
       console.error('Submission error:', error);
-      const message = error.response?.data?.detail || 'Failed to upload track';
+      const message = error.response?.data?.detail || error.message || 'Failed to upload track';
 
       // Clean up any successfully uploaded blobs from this attempt
       const blobsToClean = currentUploadBlobs.filter(Boolean);
@@ -535,7 +560,11 @@ const UploadTrack = ({ apiClient }) => {
         await cleanupBlobs(blobsToClean);
       }
 
-      toast.error(message);
+      toast({
+        title: "Upload failed",
+        description: message,
+        variant: "destructive"
+      });
       throw error; // Re-throw the original error after cleanup
     } finally {
       setLoading(false);
