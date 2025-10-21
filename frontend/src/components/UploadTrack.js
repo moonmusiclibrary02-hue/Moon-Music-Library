@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useToast } from '../hooks/use-toast';
 import { Button } from './ui/button';
@@ -44,6 +44,15 @@ const UploadTrack = ({ apiClient }) => {
     music_director_agreement_file: null
   });
 
+  // Ref to track uploaded blobs synchronously (avoids stale state issues)
+  const uploadedBlobsRef = useRef({
+    mp3_file: null,
+    lyrics_file: null,
+    session_file: null,
+    singer_agreement_file: null,
+    music_director_agreement_file: null
+  });
+
   // Track upload progress for each file
   const [uploadProgress, setUploadProgress] = useState({
     mp3_file: 0,
@@ -73,7 +82,7 @@ const UploadTrack = ({ apiClient }) => {
     // Wait a moment for auth to be ready
     const timer = setTimeout(() => retryPendingCleanups(), 2000);
     return () => clearTimeout(timer);
-  }, []);
+  }, [cleanupBlobs]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -293,7 +302,7 @@ const UploadTrack = ({ apiClient }) => {
     }
   };
 
-  const cleanupBlobs = async (blobsToClean) => {
+  const cleanupBlobs = useCallback(async (blobsToClean) => {
     const token = localStorage.getItem('token');
     if (!token) {
       // Save for later retry and notify user
@@ -322,7 +331,8 @@ const UploadTrack = ({ apiClient }) => {
         savePendingCleanup([blobName]);
       }
     }));
-  };
+  }, [apiClient, toast]);
+
 
   // Map of file types to their corresponding form field names
   const blobFieldMap = {
@@ -350,21 +360,23 @@ const UploadTrack = ({ apiClient }) => {
     const currentUploadBlobs = [];
 
     try {
-      // Clean up any previous incomplete uploads before starting
-      const existingBlobs = Object.values(uploadedBlobs).filter(Boolean);
+      // Clean up any previous incomplete uploads before starting (use ref for sync access)
+      const existingBlobs = Object.values(uploadedBlobsRef.current).filter(Boolean);
       if (existingBlobs.length > 0) {
         toast.info('Cleaning up previous upload attempt...');
         await cleanupBlobs(existingBlobs);
       }
       
       // Reset upload tracking state synchronously to prevent race conditions
-      setUploadedBlobs({
+      const resetState = {
         mp3_file: null,
         lyrics_file: null,
         session_file: null,
         singer_agreement_file: null,
         music_director_agreement_file: null
-      });
+      };
+      setUploadedBlobs(resetState);
+      uploadedBlobsRef.current = resetState;
 
       // Upload all files in parallel with coordinated abort
       const uploadPromises = [];
@@ -378,18 +390,20 @@ const UploadTrack = ({ apiClient }) => {
             // Track the blob both for cleanup and future retries
             if (result && result.blob_name) {
               currentUploadBlobs.push(result.blob_name);
-              setUploadedBlobs(prev => ({
-                ...prev,
-                [fileType]: result.blob_name
-              }));
+              setUploadedBlobs(prev => {
+                const newState = { ...prev, [fileType]: result.blob_name };
+                uploadedBlobsRef.current = newState;
+                return newState;
+              });
             }
             return { ...result, fileType };
           })
           .catch(err => {
             // Abort other uploads when one fails
             controller.abort();
-            // Wrap error with fileType
-            throw { reason: err, fileType };
+            // Set fileType on the error to preserve stack trace
+            err.fileType = fileType;
+            throw err;
           });
       };
 
@@ -445,8 +459,10 @@ const UploadTrack = ({ apiClient }) => {
           setUploadedBlobs(prev => {
             const newState = { ...prev };
             failures.forEach(failure => {
-              if (failure.value?.fileType || failure.reason?.fileType) {
-                newState[failure.value?.fileType || failure.reason?.fileType] = null;
+              const error = failure.reason || failure.value;
+              const fileType = error?.fileType;
+              if (fileType) {
+                newState[fileType] = null;
               }
             });
             return newState;
@@ -454,16 +470,18 @@ const UploadTrack = ({ apiClient }) => {
           setUploadProgress(prev => {
             const newProgress = { ...prev };
             failures.forEach(failure => {
-              if (failure.value?.fileType || failure.reason?.fileType) {
-                newProgress[failure.value?.fileType || failure.reason?.fileType] = 0;
+              const error = failure.reason || failure.value;
+              const fileType = error?.fileType;
+              if (fileType) {
+                newProgress[fileType] = 0;
               }
             });
             return newProgress;
           });
         }
-        // Get the original error from the wrapped structure
+        // Get the original error (now it's the error itself, not wrapped)
         const firstFailure = failures[0];
-        const error = firstFailure.reason?.reason || firstFailure.value?.reason || firstFailure.reason;
+        const error = firstFailure.reason || firstFailure.value;
         throw error;
       }
 
@@ -505,32 +523,7 @@ const UploadTrack = ({ apiClient }) => {
       const blobsToClean = currentUploadBlobs.filter(Boolean);
       
       if (blobsToClean.length > 0) {
-        // Save all blobs for potential later cleanup using helper
-        savePendingCleanup(blobsToClean);
-        
-        const token = localStorage.getItem('token');
-        if (!token) {
-          console.error('Authentication token not found during cleanup');
-          toast.warning('Upload files will be cleaned up when you sign in again.');
-        } else {
-          // Call backend to delete the uploaded blobs
-          await Promise.all(blobsToClean.map(async (blob) => {
-            try {
-              await apiClient.delete(`/tracks/cleanup-upload/${encodeURIComponent(blob)}`, {
-                headers: {
-                  'Authorization': `Bearer ${token}`
-                }
-              });
-              
-              // Remove from pending cleanup if successful
-              removePendingCleanup(blob);
-            } catch (cleanupError) {
-              // Log cleanup errors but don't block error handling
-              console.error(`Failed to clean up blob ${blob}:`, cleanupError);
-              // Blob will remain in pendingBlobCleanup for future retry
-            }
-          }));
-        }
+        await cleanupBlobs(blobsToClean);
       }
 
       toast.error(message);
