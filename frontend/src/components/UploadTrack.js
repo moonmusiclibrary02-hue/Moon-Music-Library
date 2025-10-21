@@ -35,6 +35,24 @@ const UploadTrack = ({ apiClient }) => {
     music_director_agreement_file: null
   });
 
+  // Track uploaded blobs for retry handling
+  const [uploadedBlobs, setUploadedBlobs] = useState({
+    mp3_file: null,
+    lyrics_file: null,
+    session_file: null,
+    singer_agreement_file: null,
+    music_director_agreement_file: null
+  });
+
+  // Track upload progress for each file
+  const [uploadProgress, setUploadProgress] = useState({
+    mp3_file: 0,
+    lyrics_file: 0,
+    session_file: 0,
+    singer_agreement_file: 0,
+    music_director_agreement_file: 0
+  });
+
   const handleInputChange = (e) => {
     const { name, value } = e.target;
     setFormData(prev => ({ ...prev, [name]: value }));
@@ -106,6 +124,11 @@ const UploadTrack = ({ apiClient }) => {
       
       console.log('File accepted, updating state');
       setFiles(prev => ({ ...prev, [fileType]: file }));
+      // Reset progress when new file is selected
+      setUploadProgress(prev => ({
+        ...prev,
+        [fileType]: 0
+      }));
       const fileTypeLabel = fileType === 'mp3_file' ? 'Audio' : 
                             fileType === 'session_file' ? 'Session' : 
                             fileType === 'lyrics_file' ? 'Lyrics' :
@@ -117,9 +140,18 @@ const UploadTrack = ({ apiClient }) => {
     }
   };
 
-  const uploadFileToGCS = async (file, folder) => {
+  const uploadFileToGCS = async (file, folder, signal) => {
     try {
+      if (signal?.aborted) {
+        throw new Error('Upload aborted');
+      }
+
       // Step 1: Get signed URL from our backend
+      const token = localStorage.getItem('token');
+      if (!token) {
+        throw new Error('Authentication token not found. Please log in again.');
+      }
+
       const formData = new FormData();
       formData.append('filename', file.name);
       formData.append('content_type', file.type);
@@ -127,33 +159,86 @@ const UploadTrack = ({ apiClient }) => {
 
       const urlResponse = await apiClient.post('/tracks/generate-upload-url', formData, {
         headers: {
-          'Content-Type': 'multipart/form-data'
-        }
+          'Content-Type': 'multipart/form-data',
+          'Authorization': `Bearer ${token}`
+        },
+        signal // Pass signal to apiClient for URL generation
       });
 
       const { signed_url, blob_name } = urlResponse.data;
 
-      // Create AbortController for timeout
-      const controller = new AbortController();
-      const timeoutMs = 5 * 60 * 1000; // 5 minutes
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      // Check for abort before starting GCS upload
+      if (signal?.aborted) {
+        throw new Error('Upload aborted');
+      }
 
-      // Retry configuration
-      const maxRetries = 3;
-      const baseDelay = 1000; // Start with 1 second delay
+      // Step 2: Upload directly to GCS with progress tracking
+      const uploadWithProgress = (url, file, fileType, signal) => {
+        return new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          
+          // Handle abort signal
+          if (signal) {
+            if (signal.aborted) {
+              reject(new Error('Upload aborted'));
+              return;
+            }
+            signal.addEventListener('abort', () => xhr.abort());
+          }
 
-      // Helper to add jitter to retry delay
-      const getRetryDelay = (attempt) => {
-        const exponentialDelay = baseDelay * Math.pow(2, attempt);
-        const jitter = Math.random() * 1000; // Random delay 0-1000ms
-        return exponentialDelay + jitter;
+          xhr.upload.addEventListener('progress', (event) => {
+            if (event.lengthComputable) {
+              const percentComplete = Math.round((event.loaded / event.total) * 100);
+              setUploadProgress(prev => ({
+                ...prev,
+                [fileType]: percentComplete
+              }));
+            }
+          });
+
+          xhr.addEventListener('load', () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve({
+                status: xhr.status,
+                ok: true
+              });
+            } else {
+              let errorDetails = `${xhr.status} ${xhr.statusText}`;
+              if (xhr.responseText) {
+                const bodySnippet = xhr.responseText.slice(0, 200);
+                errorDetails += bodySnippet.length > 200 ? 
+                  ` - ${bodySnippet}... (truncated)` : 
+                  ` - ${bodySnippet}`;
+              }
+              reject(new Error(`Failed to upload to GCS: ${errorDetails}`));
+            }
+          });
+
+          xhr.addEventListener('error', () => {
+            reject(new Error('Network error occurred during upload'));
+          });
+
+          xhr.addEventListener('abort', () => {
+            reject(new Error('Upload aborted'));
+          });
+
+          xhr.open('PUT', url);
+          xhr.setRequestHeader('Content-Type', file.type);
+          xhr.send(file);
+        });
       };
 
-      try {
-        let lastError;
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
-          try {
-            // Step 2: Upload directly to GCS
+      const uploadResponse = await uploadWithProgress(signed_url, file, folder, signal);
+
+      return {
+        blob_name,
+        filename: file.name
+      };
+    } catch (error) {
+      console.error('Upload error:', error);
+      throw error;
+    }
+  };
             const uploadResponse = await fetch(signed_url, {
               method: 'PUT',
               body: file,
@@ -176,13 +261,36 @@ const UploadTrack = ({ apiClient }) => {
             if (uploadResponse.status >= 500) {
               lastError = new Error(`Server error ${uploadResponse.status}`);
               if (attempt < maxRetries) {
-                await new Promise(resolve => setTimeout(resolve, getRetryDelay(attempt)));
-                continue;
+                try {
+                  await abortableDelay(getRetryDelay(attempt), controller.signal);
+                  continue;
+                } catch (delayErr) {
+                  if (delayErr.message === 'Delay aborted') {
+                    throw new Error('Upload timed out after 5 minutes');
+                  }
+                  throw delayErr;
+                }
               }
             }
 
-            // Non-5xx errors are thrown immediately
-            throw new Error(`Upload failed with status ${uploadResponse.status}`);
+            // For non-5xx errors, get detailed error info
+            let errorDetails = `${uploadResponse.status} ${uploadResponse.statusText}`;
+            try {
+              const bodyText = await uploadResponse.text();
+              // Limit body snippet to first 200 chars
+              const bodySnippet = bodyText.slice(0, 200);
+              if (bodyText.length > 200) {
+                errorDetails += ` - ${bodySnippet}... (truncated)`;
+              } else {
+                errorDetails += ` - ${bodySnippet}`;
+              }
+            } catch (bodyErr) {
+              // If we can't read the body, just use status info
+              console.warn('Could not read error response body:', bodyErr);
+            }
+            
+            // Non-5xx errors are thrown immediately with details
+            throw new Error(`Failed to upload to GCS: ${errorDetails}`);
           } catch (err) {
             lastError = err;
             if (err.name === 'AbortError') {
@@ -207,27 +315,92 @@ const UploadTrack = ({ apiClient }) => {
     }
   };
 
+  // Helper function to clean up blobs
+  const cleanupBlobs = async (blobsToClean) => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      console.error('Authentication token not found during cleanup');
+      return;
+    }
+
+    await Promise.all(blobsToClean.map(async (blobName) => {
+      try {
+        await apiClient.delete(`/tracks/cleanup-upload/${encodeURIComponent(blobName)}`, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+      } catch (cleanupError) {
+        console.error(`Failed to clean up blob ${blobName}:`, cleanupError);
+      }
+    }));
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
 
+    // Reset upload progress at the start
+    setUploadProgress({
+      mp3_file: 0,
+      lyrics_file: 0,
+      session_file: 0,
+      singer_agreement_file: 0,
+      music_director_agreement_file: 0
+    });
+
     try {
-      // Upload all files in parallel
+      // Clean up any previous incomplete uploads before starting
+      const previousBlobs = Object.values(uploadedBlobs).filter(Boolean);
+      if (previousBlobs.length > 0) {
+        toast.info('Cleaning up previous upload attempt...');
+        await cleanupBlobs(previousBlobs);
+        // Reset upload tracking state
+        setUploadedBlobs({
+          mp3_file: null,
+          lyrics_file: null,
+          session_file: null,
+          singer_agreement_file: null,
+          music_director_agreement_file: null
+        });
+      }
+
+      // Upload all files in parallel with coordinated abort
       const uploadPromises = [];
       const fileData = {};
-      const uploadedBlobs = []; // Track successfully uploaded blobs for cleanup on failure
+      const currentUploadBlobs = []; // Track blobs for this upload attempt
+      const controller = new AbortController(); // Single controller for all uploads
 
       // Helper to create an upload promise that handles both success and failure
       const createUploadPromise = (file, folder, fileType) => {
-        return uploadFileToGCS(file, folder)
+        // Check if we already have an uploaded blob for this file
+        if (uploadedBlobs[fileType]) {
+          console.log(`Using existing upload for ${fileType}`);
+          return Promise.resolve({
+            status: 'fulfilled',
+            fileType,
+            value: {
+              blob_name: uploadedBlobs[fileType],
+              filename: file.name
+            }
+          });
+        }
+
+        return uploadFileToGCS(file, folder, controller.signal)
           .then(result => {
-            // Track the blob for potential cleanup regardless of overall success
+            // Track the blob both for cleanup and future retries
             if (result && result.blob_name) {
-              uploadedBlobs.push(result.blob_name);
+              currentUploadBlobs.push(result.blob_name);
+              setUploadedBlobs(prev => ({
+                ...prev,
+                [fileType]: result.blob_name
+              }));
             }
             return { status: 'fulfilled', fileType, value: result };
           })
           .catch(error => {
+            // Abort all remaining uploads on first failure
+            controller.abort();
             return { status: 'rejected', fileType, reason: error };
           });
       };
@@ -278,10 +451,32 @@ const UploadTrack = ({ apiClient }) => {
         }
       });
 
-      // If there were any failures, clean up all blobs and throw error
+      // If there were any failures, clean up blobs from this attempt and throw error
       if (failures.length > 0) {
+        if (currentUploadBlobs.length > 0) {
+          await cleanupBlobs(currentUploadBlobs);
+          // Reset upload tracking state and progress for failed files
+          setUploadedBlobs(prev => {
+            const newState = { ...prev };
+            failures.forEach(failure => {
+              if (failure.fileType) {
+                newState[failure.fileType] = null;
+              }
+            });
+            return newState;
+          });
+          setUploadProgress(prev => {
+            const newProgress = { ...prev };
+            failures.forEach(failure => {
+              if (failure.fileType) {
+                newProgress[failure.fileType] = 0;
+              }
+            });
+            return newProgress;
+          });
+        }
         const error = failures[0].value?.reason || failures[0].reason;
-        throw error; // This will trigger the catch block which handles cleanup
+        throw error;
       }
 
       // Create form data with metadata and blob references
@@ -294,11 +489,12 @@ const UploadTrack = ({ apiClient }) => {
 
       // Add blob names and filenames
       if (fileData.mp3_file) {
-        uploadData.append('mp3_blob_name', fileData.mp3_file.blob_name);
-        uploadData.append('mp3_filename', fileData.mp3_file.filename);
-      }
-
-      if (fileData.lyrics_file) {
+      const response = await apiClient.post('/tracks', uploadData, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        timeout: 60000 // 60 second timeout
+      });
         uploadData.append('lyrics_blob_name', fileData.lyrics_file.blob_name);
         uploadData.append('lyrics_filename', fileData.lyrics_file.filename);
       }
@@ -333,24 +529,25 @@ const UploadTrack = ({ apiClient }) => {
 
       // Clean up any successfully uploaded blobs
       if (uploadedBlobs.length > 0) {
-        try {
-          // Call backend to delete the uploaded blobs
-          await Promise.all(uploadedBlobs.map(async (blobName) => {
-            try {
-              await apiClient.delete(`/tracks/cleanup-upload/${encodeURIComponent(blobName)}`, {
-                headers: {
-                  'Authorization': `Bearer ${localStorage.getItem('token')}`
-                }
-              });
-            } catch (cleanupError) {
-              // Log cleanup errors but don't block error handling
-              console.error(`Failed to clean up blob ${blobName}:`, cleanupError);
-            }
-          }));
-        } catch (cleanupError) {
-          // Log any cleanup errors but don't mask the original error
-          console.error('Error during cleanup:', cleanupError);
+        const token = localStorage.getItem('token');
+        if (!token) {
+          console.error('Authentication token not found during cleanup');
+          return; // Skip cleanup if token is missing
         }
+
+        // Call backend to delete the uploaded blobs
+        await Promise.all(uploadedBlobs.map(async (blobName) => {
+          try {
+            await apiClient.delete(`/tracks/cleanup-upload/${encodeURIComponent(blobName)}`, {
+              headers: {
+                'Authorization': `Bearer ${token}`
+              }
+            });
+          } catch (cleanupError) {
+            // Log cleanup errors but don't block error handling
+            console.error(`Failed to clean up blob ${blobName}:`, cleanupError);
+          }
+        }));
       }
 
       toast.error(message);
@@ -358,6 +555,29 @@ const UploadTrack = ({ apiClient }) => {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Add this component to display upload progress
+  const ProgressBar = ({ progress, fileName }) => {
+    // Only show progress bar if a file is selected and upload has started
+    if (progress === 0 || !fileName) return null;
+    
+    return (
+      <div className="w-full mt-2">
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-sm font-medium text-gray-700">
+            {progress < 100 ? 'Uploading...' : 'Upload Complete'}
+          </span>
+          <span className="text-sm font-medium text-gray-700">{progress}%</span>
+        </div>
+        <div className="w-full bg-gray-200 rounded-full h-2">
+          <div
+            className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      </div>
+    );
   };
 
   const formatFileSize = (bytes) => {
