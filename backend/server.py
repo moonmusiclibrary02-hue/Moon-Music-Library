@@ -1662,6 +1662,48 @@ async def generate_upload_url(
     if folder not in valid_folders:
         raise HTTPException(status_code=400, detail=f"Invalid folder. Must be one of: {valid_folders}")
 
+    # Define allowed MIME types per folder
+    allowed_content_types = {
+        'audio': [
+            'audio/mpeg',
+            'audio/wav',
+            'audio/x-wav',
+            'audio/mp3',
+            'audio/mp4',
+            'audio/x-m4a'
+        ],
+        'lyrics': [
+            'text/plain',
+            'application/pdf',
+            'application/msword',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        ],
+        'sessions': [
+            'application/zip',
+            'application/x-zip-compressed',
+            'application/x-rar-compressed',
+            'application/octet-stream'  # For some ZIP/RAR files
+        ],
+        'agreements': [
+            'application/pdf',
+            'application/msword',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'image/jpeg',
+            'image/png',
+            'image/webp'
+        ]
+    }
+
+    # Validate content type
+    if not content_type:
+        raise HTTPException(status_code=400, detail="Content type is required")
+
+    if content_type not in allowed_content_types[folder]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid content type for {folder} folder. Allowed types: {', '.join(allowed_content_types[folder])}"
+        )
+
     try:
         # Generate unique blob name with UUID and original filename
         blob_name = f"{folder}/{uuid.uuid4()}_{filename}"
@@ -1677,15 +1719,16 @@ async def generate_upload_url(
             content_type=content_type,
         )
 
-        return {
+    except Exception as e:
+        logger.exception(f"Failed to generate upload URL for {filename}")
+        raise HTTPException(status_code=500, detail="Failed to generate upload URL") from e
+
+    
+    return {
             "signed_url": signed_url,
             "blob_name": blob_name,
             "filename": filename
-        }
-
-    except Exception as e:
-        logger.exception(f"Failed to generate upload URL for {filename}")
-        raise HTTPException(status_code=500, detail=str(e))
+    }
 
 # Include the router in the main app
 app.include_router(api_router)

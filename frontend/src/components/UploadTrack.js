@@ -125,36 +125,81 @@ const UploadTrack = ({ apiClient }) => {
       formData.append('content_type', file.type);
       formData.append('folder', folder);
 
-      const urlResponse = await fetch('/api/tracks/generate-upload-url', {
-        method: 'POST',
-        body: formData,
+      const urlResponse = await apiClient.post('/tracks/generate-upload-url', formData, {
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
+          'Content-Type': 'multipart/form-data'
         }
       });
 
-      if (!urlResponse.ok) {
-        throw new Error('Failed to get upload URL');
-      }
+      const { signed_url, blob_name } = urlResponse.data;
 
-      const { signed_url, blob_name } = await urlResponse.json();
+      // Create AbortController for timeout
+      const controller = new AbortController();
+      const timeoutMs = 5 * 60 * 1000; // 5 minutes
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-      // Step 2: Upload directly to GCS
-      const uploadResponse = await fetch(signed_url, {
-        method: 'PUT',
-        body: file,
-        headers: {
-          'Content-Type': file.type
+      // Retry configuration
+      const maxRetries = 3;
+      const baseDelay = 1000; // Start with 1 second delay
+
+      // Helper to add jitter to retry delay
+      const getRetryDelay = (attempt) => {
+        const exponentialDelay = baseDelay * Math.pow(2, attempt);
+        const jitter = Math.random() * 1000; // Random delay 0-1000ms
+        return exponentialDelay + jitter;
+      };
+
+      try {
+        let lastError;
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+          try {
+            // Step 2: Upload directly to GCS
+            const uploadResponse = await fetch(signed_url, {
+              method: 'PUT',
+              body: file,
+              headers: {
+                'Content-Type': file.type
+              },
+              signal: controller.signal
+            });
+
+            // Check if upload was successful
+            if (uploadResponse.ok) {
+              clearTimeout(timeoutId);
+              return {
+                blob_name,
+                filename: file.name
+              };
+            }
+
+            // Handle server errors (5xx) with retry
+            if (uploadResponse.status >= 500) {
+              lastError = new Error(`Server error ${uploadResponse.status}`);
+              if (attempt < maxRetries) {
+                await new Promise(resolve => setTimeout(resolve, getRetryDelay(attempt)));
+                continue;
+              }
+            }
+
+            // Non-5xx errors are thrown immediately
+            throw new Error(`Upload failed with status ${uploadResponse.status}`);
+          } catch (err) {
+            lastError = err;
+            if (err.name === 'AbortError') {
+              throw new Error('Upload timed out after 5 minutes');
+            }
+            // Retry on network errors unless aborted
+            if (attempt < maxRetries && !controller.signal.aborted && 
+                (err instanceof TypeError || err.message.includes('network'))) {
+              await new Promise(resolve => setTimeout(resolve, getRetryDelay(attempt)));
+              continue;
+            }
+            throw err;
+          }
         }
-      });
-
-      if (!uploadResponse.ok) {
-        throw new Error('Failed to upload to GCS');
-      }
-
-      return {
-        blob_name,
-        filename: file.name
+        throw lastError;
+      } finally {
+        clearTimeout(timeoutId);
       };
     } catch (error) {
       console.error('Upload error:', error);
@@ -170,57 +215,111 @@ const UploadTrack = ({ apiClient }) => {
       // Upload all files in parallel
       const uploadPromises = [];
       const fileData = {};
+      const uploadedBlobs = []; // Track successfully uploaded blobs for cleanup on failure
+
+      // Helper to create an upload promise that handles both success and failure
+      const createUploadPromise = (file, folder, fileType) => {
+        return uploadFileToGCS(file, folder)
+          .then(result => {
+            // Track the blob for potential cleanup regardless of overall success
+            if (result && result.blob_name) {
+              uploadedBlobs.push(result.blob_name);
+            }
+            return { status: 'fulfilled', fileType, value: result };
+          })
+          .catch(error => {
+            return { status: 'rejected', fileType, reason: error };
+          });
+      };
 
       if (files.mp3_file) {
         uploadPromises.push(
-          uploadFileToGCS(files.mp3_file, 'audio')
-            .then(result => fileData.mp3_file = result)
+          createUploadPromise(files.mp3_file, 'audio', 'mp3_file')
         );
       }
 
       if (files.lyrics_file) {
         uploadPromises.push(
-          uploadFileToGCS(files.lyrics_file, 'lyrics')
-            .then(result => fileData.lyrics_file = result)
+          createUploadPromise(files.lyrics_file, 'lyrics', 'lyrics_file')
         );
       }
 
       if (files.session_file) {
         uploadPromises.push(
-          uploadFileToGCS(files.session_file, 'sessions')
-            .then(result => fileData.session_file = result)
+          createUploadPromise(files.session_file, 'sessions', 'session_file')
         );
       }
 
-      // Wait for all uploads to complete
-      await Promise.all(uploadPromises);
+      if (files.singer_agreement_file) {
+        uploadPromises.push(
+          createUploadPromise(files.singer_agreement_file, 'agreements', 'singer_agreement_file')
+        );
+      }
+
+      if (files.music_director_agreement_file) {
+        uploadPromises.push(
+          createUploadPromise(files.music_director_agreement_file, 'agreements', 'music_director_agreement_file')
+        );
+      }
+
+      // Wait for all uploads to complete and process results
+      const results = await Promise.allSettled(uploadPromises);
+      
+      // Check for any failures and process successful uploads
+      const failures = results.filter(result => 
+        result.value?.status === 'rejected' || result.status === 'rejected'
+      );
+
+      // Process successful uploads into fileData
+      results.forEach(result => {
+        if (result.value?.status === 'fulfilled') {
+          const { fileType, value } = result.value;
+          fileData[fileType] = value;
+        }
+      });
+
+      // If there were any failures, clean up all blobs and throw error
+      if (failures.length > 0) {
+        const error = failures[0].value?.reason || failures[0].reason;
+        throw error; // This will trigger the catch block which handles cleanup
+      }
 
       // Create form data with metadata and blob references
-      const formData = new FormData();
+      const uploadData = new FormData();
       
-      // Add metadata
+      // Add metadata from component state
       Object.entries(formData).forEach(([key, value]) => {
-        formData.append(key, value);
+        uploadData.append(key, value);
       });
 
       // Add blob names and filenames
       if (fileData.mp3_file) {
-        formData.append('mp3_blob_name', fileData.mp3_file.blob_name);
-        formData.append('mp3_filename', fileData.mp3_file.filename);
+        uploadData.append('mp3_blob_name', fileData.mp3_file.blob_name);
+        uploadData.append('mp3_filename', fileData.mp3_file.filename);
       }
 
       if (fileData.lyrics_file) {
-        formData.append('lyrics_blob_name', fileData.lyrics_file.blob_name);
-        formData.append('lyrics_filename', fileData.lyrics_file.filename);
+        uploadData.append('lyrics_blob_name', fileData.lyrics_file.blob_name);
+        uploadData.append('lyrics_filename', fileData.lyrics_file.filename);
       }
 
       if (fileData.session_file) {
-        formData.append('session_blob_name', fileData.session_file.blob_name);
-        formData.append('session_filename', fileData.session_file.filename);
+        uploadData.append('session_blob_name', fileData.session_file.blob_name);
+        uploadData.append('session_filename', fileData.session_file.filename);
+      }
+
+      if (fileData.singer_agreement_file) {
+        uploadData.append('singer_agreement_blob_name', fileData.singer_agreement_file.blob_name);
+        uploadData.append('singer_agreement_filename', fileData.singer_agreement_file.filename);
+      }
+
+      if (fileData.music_director_agreement_file) {
+        uploadData.append('music_director_agreement_blob_name', fileData.music_director_agreement_file.blob_name);
+        uploadData.append('music_director_agreement_filename', fileData.music_director_agreement_file.filename);
       }
 
       // Submit track metadata to backend
-      const response = await apiClient.post('/tracks', formData, {
+      const response = await apiClient.post('/tracks', uploadData, {
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`
         }
@@ -231,7 +330,31 @@ const UploadTrack = ({ apiClient }) => {
     } catch (error) {
       console.error('Submission error:', error);
       const message = error.response?.data?.detail || 'Failed to upload track';
+
+      // Clean up any successfully uploaded blobs
+      if (uploadedBlobs.length > 0) {
+        try {
+          // Call backend to delete the uploaded blobs
+          await Promise.all(uploadedBlobs.map(async (blobName) => {
+            try {
+              await apiClient.delete(`/tracks/cleanup-upload/${encodeURIComponent(blobName)}`, {
+                headers: {
+                  'Authorization': `Bearer ${localStorage.getItem('token')}`
+                }
+              });
+            } catch (cleanupError) {
+              // Log cleanup errors but don't block error handling
+              console.error(`Failed to clean up blob ${blobName}:`, cleanupError);
+            }
+          }));
+        } catch (cleanupError) {
+          // Log any cleanup errors but don't mask the original error
+          console.error('Error during cleanup:', cleanupError);
+        }
+      }
+
       toast.error(message);
+      throw error; // Re-throw the original error after cleanup
     } finally {
       setLoading(false);
     }
