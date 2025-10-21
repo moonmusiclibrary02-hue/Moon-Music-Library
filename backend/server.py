@@ -1822,20 +1822,25 @@ async def generate_upload_url(
             'application/pdf',
             'application/msword',
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'text/plain',
             'image/jpeg',
+            'image/jpg',
             'image/png',
-            'image/webp'
+            'image/webp',
+            'image/gif'
         ]
     }
 
     # Validate content type
     if not content_type:
+        logger.error(f"Content type missing for file: {filename}")
         raise HTTPException(status_code=400, detail="Content type is required")
 
     if content_type not in allowed_content_types[folder]:
+        logger.error(f"Invalid content type '{content_type}' for folder '{folder}'. File: {filename}")
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid content type for {folder} folder. Allowed types: {', '.join(allowed_content_types[folder])}"
+            detail=f"Invalid content type '{content_type}' for {folder} folder. Allowed types: {', '.join(allowed_content_types[folder])}"
         )
 
     try:
