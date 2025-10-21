@@ -239,81 +239,6 @@ const UploadTrack = ({ apiClient }) => {
       throw error;
     }
   };
-            const uploadResponse = await fetch(signed_url, {
-              method: 'PUT',
-              body: file,
-              headers: {
-                'Content-Type': file.type
-              },
-              signal: controller.signal
-            });
-
-            // Check if upload was successful
-            if (uploadResponse.ok) {
-              clearTimeout(timeoutId);
-              return {
-                blob_name,
-                filename: file.name
-              };
-            }
-
-            // Handle server errors (5xx) with retry
-            if (uploadResponse.status >= 500) {
-              lastError = new Error(`Server error ${uploadResponse.status}`);
-              if (attempt < maxRetries) {
-                try {
-                  await abortableDelay(getRetryDelay(attempt), controller.signal);
-                  continue;
-                } catch (delayErr) {
-                  if (delayErr.message === 'Delay aborted') {
-                    throw new Error('Upload timed out after 5 minutes');
-                  }
-                  throw delayErr;
-                }
-              }
-            }
-
-            // For non-5xx errors, get detailed error info
-            let errorDetails = `${uploadResponse.status} ${uploadResponse.statusText}`;
-            try {
-              const bodyText = await uploadResponse.text();
-              // Limit body snippet to first 200 chars
-              const bodySnippet = bodyText.slice(0, 200);
-              if (bodyText.length > 200) {
-                errorDetails += ` - ${bodySnippet}... (truncated)`;
-              } else {
-                errorDetails += ` - ${bodySnippet}`;
-              }
-            } catch (bodyErr) {
-              // If we can't read the body, just use status info
-              console.warn('Could not read error response body:', bodyErr);
-            }
-            
-            // Non-5xx errors are thrown immediately with details
-            throw new Error(`Failed to upload to GCS: ${errorDetails}`);
-          } catch (err) {
-            lastError = err;
-            if (err.name === 'AbortError') {
-              throw new Error('Upload timed out after 5 minutes');
-            }
-            // Retry on network errors unless aborted
-            if (attempt < maxRetries && !controller.signal.aborted && 
-                (err instanceof TypeError || err.message.includes('network'))) {
-              await new Promise(resolve => setTimeout(resolve, getRetryDelay(attempt)));
-              continue;
-            }
-            throw err;
-          }
-        }
-        throw lastError;
-      } finally {
-        clearTimeout(timeoutId);
-      };
-    } catch (error) {
-      console.error('Upload error:', error);
-      throw error;
-    }
-  };
 
   // Helper function to clean up blobs
   const cleanupBlobs = async (blobsToClean) => {
@@ -336,9 +261,18 @@ const UploadTrack = ({ apiClient }) => {
     }));
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
+  // Map of file types to their corresponding form field names
+  const blobFieldMap = {
+    mp3_file: ['mp3_blob_name', 'mp3_filename'],
+    lyrics_file: ['lyrics_blob_name', 'lyrics_filename'],
+    session_file: ['session_blob_name', 'session_filename'],
+    singer_agreement_file: ['singer_agreement_blob_name', 'singer_agreement_filename'],
+    music_director_agreement_file: ['music_director_agreement_blob_name', 'music_director_agreement_filename']
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setIsSubmitting(true);
 
     // Reset upload progress at the start
     setUploadProgress({
@@ -351,10 +285,10 @@ const UploadTrack = ({ apiClient }) => {
 
     try {
       // Clean up any previous incomplete uploads before starting
-      const previousBlobs = Object.values(uploadedBlobs).filter(Boolean);
-      if (previousBlobs.length > 0) {
+      const existingBlobs = Object.values(uploadedBlobs).filter(Boolean);
+      if (existingBlobs.length > 0) {
         toast.info('Cleaning up previous upload attempt...');
-        await cleanupBlobs(previousBlobs);
+        await cleanupBlobs(existingBlobs);
         // Reset upload tracking state
         setUploadedBlobs({
           mp3_file: null,
@@ -376,14 +310,11 @@ const UploadTrack = ({ apiClient }) => {
         // Check if we already have an uploaded blob for this file
         if (uploadedBlobs[fileType]) {
           console.log(`Using existing upload for ${fileType}`);
-          return Promise.resolve({
-            status: 'fulfilled',
+          return {
             fileType,
-            value: {
-              blob_name: uploadedBlobs[fileType],
-              filename: file.name
-            }
-          });
+            blob_name: uploadedBlobs[fileType],
+            filename: file.name
+          };
         }
 
         return uploadFileToGCS(file, folder, controller.signal)
@@ -396,12 +327,7 @@ const UploadTrack = ({ apiClient }) => {
                 [fileType]: result.blob_name
               }));
             }
-            return { status: 'fulfilled', fileType, value: result };
-          })
-          .catch(error => {
-            // Abort all remaining uploads on first failure
-            controller.abort();
-            return { status: 'rejected', fileType, reason: error };
+            return { ...result, fileType };
           });
       };
 
@@ -438,16 +364,14 @@ const UploadTrack = ({ apiClient }) => {
       // Wait for all uploads to complete and process results
       const results = await Promise.allSettled(uploadPromises);
       
-      // Check for any failures and process successful uploads
-      const failures = results.filter(result => 
-        result.value?.status === 'rejected' || result.status === 'rejected'
-      );
-
-      // Process successful uploads into fileData
+      // Process results
+      const failures = [];
       results.forEach(result => {
-        if (result.value?.status === 'fulfilled') {
-          const { fileType, value } = result.value;
-          fileData[fileType] = value;
+        if (result.status === 'fulfilled') {
+          const { fileType, blob_name, filename } = result.value;
+          fileData[fileType] = { blob_name, filename };
+        } else {
+          failures.push(result.reason);
         }
       });
 
@@ -484,36 +408,28 @@ const UploadTrack = ({ apiClient }) => {
       
       // Add metadata from component state
       Object.entries(formData).forEach(([key, value]) => {
-        uploadData.append(key, value);
+        if (value) {
+          uploadData.append(key, value);
+        }
       });
+
+      // Map of file types to their corresponding form field names
+      const blobFieldMap = {
+        mp3_file: ['mp3_blob_name', 'mp3_filename'],
+        lyrics_file: ['lyrics_blob_name', 'lyrics_filename'],
+        session_file: ['session_blob_name', 'session_filename'],
+        singer_agreement_file: ['singer_agreement_blob_name', 'singer_agreement_filename'],
+        music_director_agreement_file: ['music_director_agreement_blob_name', 'music_director_agreement_filename']
+      };
 
       // Add blob names and filenames
-      if (fileData.mp3_file) {
-      const response = await apiClient.post('/tracks', uploadData, {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        },
-        timeout: 60000 // 60 second timeout
+      Object.entries(fileData).forEach(([fileType, data]) => {
+        const [blobField, filenameField] = blobFieldMap[fileType];
+        if (data?.blob_name) {
+          uploadData.append(blobField, data.blob_name);
+          uploadData.append(filenameField, data.filename);
+        }
       });
-        uploadData.append('lyrics_blob_name', fileData.lyrics_file.blob_name);
-        uploadData.append('lyrics_filename', fileData.lyrics_file.filename);
-      }
-
-      if (fileData.session_file) {
-        uploadData.append('session_blob_name', fileData.session_file.blob_name);
-        uploadData.append('session_filename', fileData.session_file.filename);
-      }
-
-      if (fileData.singer_agreement_file) {
-        uploadData.append('singer_agreement_blob_name', fileData.singer_agreement_file.blob_name);
-        uploadData.append('singer_agreement_filename', fileData.singer_agreement_file.filename);
-      }
-
-      if (fileData.music_director_agreement_file) {
-        uploadData.append('music_director_agreement_blob_name', fileData.music_director_agreement_file.blob_name);
-        uploadData.append('music_director_agreement_filename', fileData.music_director_agreement_file.filename);
-      }
-
       // Submit track metadata to backend
       const response = await apiClient.post('/tracks', uploadData, {
         headers: {
@@ -956,6 +872,10 @@ const UploadTrack = ({ apiClient }) => {
                     )}
                   </div>
                 </Label>
+                <ProgressBar 
+                  progress={uploadProgress.mp3_file} 
+                  fileName={files.mp3_file?.name}
+                />
               </div>
             </div>
 
@@ -993,6 +913,10 @@ const UploadTrack = ({ apiClient }) => {
                     )}
                   </div>
                 </Label>
+                <ProgressBar 
+                  progress={uploadProgress.lyrics_file} 
+                  fileName={files.lyrics_file?.name}
+                />
               </div>
             </div>
 
@@ -1032,6 +956,16 @@ const UploadTrack = ({ apiClient }) => {
                 </Label>
               </div>
             </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        </Label>
+                <ProgressBar 
+                  progress={uploadProgress.session_file} 
+                  fileName={files.session_file?.name}
+                />
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -1104,6 +1038,10 @@ const UploadTrack = ({ apiClient }) => {
                     )}
                   </div>
                 </Label>
+                <ProgressBar 
+                  progress={uploadProgress.singer_agreement_file} 
+                  fileName={files.singer_agreement_file?.name}
+                />
               </div>
 
               {/* Music Director Agreement */}
@@ -1161,6 +1099,10 @@ const UploadTrack = ({ apiClient }) => {
                     )}
                   </div>
                 </Label>
+                <ProgressBar 
+                  progress={uploadProgress.music_director_agreement_file} 
+                  fileName={files.music_director_agreement_file?.name}
+                />
               </div>
             </div>
           </CardContent>

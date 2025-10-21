@@ -903,6 +903,72 @@ async def process_bulk_upload_row(row_data, row_number, current_user):
         logger.error(f"Error processing row {row_number}: {e}")
         return None, f"Unexpected error: {str(e)}"
 
+# Rate limiter setup
+class RateLimiter:
+    def __init__(self, max_requests: int, time_window: int):
+        self.max_requests = max_requests
+        self.time_window = time_window  # in seconds
+        self.requests = {}
+
+    async def is_allowed(self, user_id: str) -> bool:
+        now = time.time()
+        user_requests = self.requests.get(user_id, [])
+        
+        # Clean up old requests
+        user_requests = [req_time for req_time in user_requests if now - req_time < self.time_window]
+        
+        if len(user_requests) >= self.max_requests:
+            return False
+        
+        user_requests.append(now)
+        self.requests[user_id] = user_requests
+        return True
+
+# Initialize rate limiter (15 requests per minute per user)
+upload_rate_limiter = RateLimiter(max_requests=15, time_window=60)
+
+def require_upload_permission(folder: str, current_user: User):
+    """Validate user's permission to upload to specific folder"""
+    if current_user.user_type == "admin":
+        return  # Admins have full access
+    
+    if current_user.user_type != "manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only managers and admins can upload files"
+        )
+    
+    # For managers, ensure they're only uploading to their assigned language folders
+    # This assumes folders are language-specific, adjust logic if needed
+    if folder == "audio" and current_user.manager_id:
+        manager = db.managers.find_one({"id": current_user.manager_id})
+        if not manager or not manager.get("is_active"):
+            raise HTTPException(
+                status_code=403,
+                detail="Manager account is inactive"
+            )
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename for safe storage"""
+    # Remove path components
+    filename = os.path.basename(filename)
+    
+    # Restrict length (max 255 chars including extension)
+    name, ext = os.path.splitext(filename)
+    if len(filename) > 255:
+        name = name[:255 - len(ext)]
+        filename = name + ext
+    
+    # Replace unsafe characters, preserve extension
+    safe_chars = set(string.ascii_letters + string.digits + '.-_')
+    name = ''.join(c if c in safe_chars else '_' for c in name)
+    
+    # Ensure filename isn't empty after sanitization
+    if not name:
+        name = 'unnamed'
+    
+    return name + ext
+
 # Routes
 @api_router.post("/auth/register", response_model=User)
 async def register(user_data: UserCreate):
@@ -1654,6 +1720,13 @@ async def generate_upload_url(
     current_user: User = Depends(get_current_user)
 ):
     """Generate a signed URL for direct-to-GCS file upload"""
+    # Check rate limit
+    if not await upload_rate_limiter.is_allowed(current_user.id):
+        raise HTTPException(
+            status_code=429,
+            detail="Upload rate limit exceeded. Please try again later."
+        )
+
     if not GCS_BUCKET_NAME:
         raise HTTPException(status_code=500, detail="Storage configuration missing")
 
@@ -1661,6 +1734,9 @@ async def generate_upload_url(
     valid_folders = ['audio', 'lyrics', 'sessions', 'agreements']
     if folder not in valid_folders:
         raise HTTPException(status_code=400, detail=f"Invalid folder. Must be one of: {valid_folders}")
+
+    # Check user's permission for the requested folder
+    require_upload_permission(folder, current_user)
 
     # Define allowed MIME types per folder
     allowed_content_types = {
@@ -1705,8 +1781,11 @@ async def generate_upload_url(
         )
 
     try:
-        # Generate unique blob name with UUID and original filename
-        blob_name = f"{folder}/{uuid.uuid4()}_{filename}"
+        # Sanitize filename
+        safe_filename = sanitize_filename(filename)
+        
+        # Generate unique blob name with UUID and sanitized filename
+        blob_name = f"{folder}/{uuid.uuid4()}_{safe_filename}"
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(blob_name)
 
@@ -1719,6 +1798,9 @@ async def generate_upload_url(
             content_type=content_type,
         )
 
+        # Log upload URL generation for audit
+        logger.info(f"Generated upload URL for user {current_user.id} - folder: {folder}, file: {safe_filename}")
+
     except Exception as e:
         logger.exception(f"Failed to generate upload URL for {filename}")
         raise HTTPException(status_code=500, detail="Failed to generate upload URL") from e
@@ -1729,6 +1811,42 @@ async def generate_upload_url(
             "blob_name": blob_name,
             "filename": filename
     }
+
+@api_router.delete("/tracks/cleanup-upload/{blob_name:path}")
+async def cleanup_upload(
+    blob_name: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Delete an uploaded file from GCS storage"""
+    if not blob_name:
+        raise HTTPException(status_code=400, detail="Blob name is required")
+
+    # Validate blob path structure
+    valid_folders = ['audio', 'lyrics', 'sessions', 'agreements']
+    folder = blob_name.split('/')[0] if '/' in blob_name else None
+    
+    if not folder or folder not in valid_folders:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid blob path. Must start with one of: {valid_folders}"
+        )
+
+    # Check user's permission for the folder
+    require_upload_permission(folder, current_user)
+
+    try:
+        # Attempt to delete the blob
+        await delete_from_gcs(blob_name)
+        logger.info(f"Successfully cleaned up blob {blob_name} for user {current_user.id}")
+        return {"message": "File cleaned up successfully"}
+        
+    except Exception as e:
+        logger.exception(f"Failed to clean up blob {blob_name}")
+        # Don't expose internal error details to the client
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to clean up file"
+        )
 
 # Include the router in the main app
 app.include_router(api_router)
