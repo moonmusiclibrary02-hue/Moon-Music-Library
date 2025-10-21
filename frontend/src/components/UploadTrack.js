@@ -333,7 +333,6 @@ const UploadTrack = ({ apiClient }) => {
             // Wrap error with fileType
             throw { reason: err, fileType };
           });
-          });
       };
 
       if (files.mp3_file) {
