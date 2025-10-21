@@ -1619,7 +1619,7 @@ async def get_next_unique_code(full_prefix: str, current_user: User = Depends(ge
         # If exists, try next number
         next_number += 1
         unique_code = f"{language_code}-{prefix}{next_number:04d}"
-    
+    logger.info(f"Generated unique code: {unique_code} for prefix: {full_prefix}")
     return {"unique_code": unique_code}
 
 @api_router.put("/tracks/{track_id}", response_model=MusicTrack)
@@ -1646,187 +1646,46 @@ async def update_track(
     updated_track = await db.tracks.find_one({"id": track_id})
     return MusicTrack(**parse_from_mongo(updated_track))
 
-# (obsolete code removed)
-@api_router.get("/tracks/bulk-upload/template")
-async def download_bulk_upload_template(current_user: User = Depends(get_current_user)):
-    """Download Excel template for bulk upload"""
+@api_router.post("/tracks/generate-upload-url")
+async def generate_upload_url(
+    filename: str = Form(...),
+    content_type: str = Form(...),
+    folder: str = Form(...),
+    current_user: User = Depends(get_current_user)
+):
+    """Generate a signed URL for direct-to-GCS file upload"""
+    if not GCS_BUCKET_NAME:
+        raise HTTPException(status_code=500, detail="Storage configuration missing")
+
+    # Validate folder type
+    valid_folders = ['audio', 'lyrics', 'sessions', 'agreements']
+    if folder not in valid_folders:
+        raise HTTPException(status_code=400, detail=f"Invalid folder. Must be one of: {valid_folders}")
+
     try:
-        logger.info(f"Template download requested by user: {current_user.email}")
-        wb = generate_excel_template()
-        
-        # Save to bytes
-        excel_buffer = io.BytesIO()
-        wb.save(excel_buffer)
-        excel_buffer.seek(0)
-        
-        content = excel_buffer.getvalue()
-        logger.info(f"Template generated successfully, size: {len(content)} bytes")
-        
-        return Response(
-            content,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=bulk_tracks_template.xlsx"}
+        # Generate unique blob name with UUID and original filename
+        blob_name = f"{folder}/{uuid.uuid4()}_{filename}"
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_name)
+
+        # Generate v4 signed URL for upload, valid for 15 minutes
+        signed_url = await asyncio.to_thread(
+            blob.generate_signed_url,
+            expiration=timedelta(minutes=15),
+            method="PUT",
+            version="v4",
+            content_type=content_type,
         )
-    except Exception as e:
-        logger.error(f"Error generating template: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Failed to generate template: {str(e)}")
 
-@api_router.post("/tracks/bulk-upload", response_model=BulkUploadResponse)
-async def bulk_upload_tracks(
-    file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user)
-):
-    """Bulk upload tracks from Excel file"""
-    if not file.filename.lower().endswith(('.xlsx', '.xls')):
-        raise HTTPException(status_code=400, detail="File must be an Excel file (.xlsx or .xls)")
-    
-    try:
-        # Read Excel file
-        contents = await file.read()
-        
-        # Create a temporary file to read with pandas
-        excel_buffer = io.BytesIO(contents)
-        df = pd.read_excel(excel_buffer, sheet_name=0)  # Read first sheet
-        
-        successful_count = 0
-        failed_count = 0
-        errors = []
-        successful_tracks = []
-        
-        # Process each row
-        for index, row in df.iterrows():
-            row_number = index + 2  # +2 because pandas is 0-indexed and Excel header is row 1
-            
-            # Skip empty rows
-            if row.isna().all():
-                continue
-            
-            try:
-                track_id, error = await process_bulk_upload_row(row.to_dict(), row_number, current_user)
-                
-                if error:
-                    failed_count += 1
-                    errors.append({
-                        "row": row_number,
-                        "error": error
-                    })
-                else:
-                    successful_count += 1
-                    successful_tracks.append(track_id)
-                    
-            except Exception as e:
-                failed_count += 1
-                errors.append({
-                    "row": row_number,
-                    "error": f"Unexpected error: {str(e)}"
-                })
-        
-        return BulkUploadResponse(
-            successful_count=successful_count,
-            failed_count=failed_count,
-            errors=errors,
-            successful_tracks=successful_tracks
-        )
-        
-    except Exception as e:
-        logger.error(f"Bulk upload error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process Excel file: {str(e)}")
+        return {
+            "signed_url": signed_url,
+            "blob_name": blob_name,
+            "filename": filename
+        }
 
-@api_router.get("/tracks/{track_id}/lyrics-content")
-async def get_lyrics_content(
-    track_id: str,
-    current_user: User = Depends(get_current_user)
-):
-    track = await db.tracks.find_one({"id": track_id})
-    if not track:
-        raise HTTPException(status_code=404, detail="Track not found")
-    
-    lyrics_blob_name = track.get("lyrics_blob_name")
-    if not lyrics_blob_name:
-        raise HTTPException(status_code=404, detail="Lyrics file not found")
-    
-    try:
-        # Read the lyrics content from GCS
-        content = await read_gcs_text(lyrics_blob_name)
-        return {"content": content, "filename": track.get("lyrics_filename", "lyrics.txt")}
     except Exception as e:
-        logger.exception(f"Failed to read lyrics from GCS blob: {lyrics_blob_name}")
-        raise HTTPException(status_code=500, detail="Could not read lyrics file")
-
-@api_router.get("/tracks/{track_id}/download/{file_type}")
-async def download_file(
-    track_id: str,
-    file_type: str,  # 'mp3', 'lyrics', 'session', 'singer_agreement', 'music_director_agreement'
-    stream: bool = False,
-    current_user: User = Depends(get_current_user)
-):
-    track = await db.tracks.find_one({"id": track_id})
-    if not track:
-        raise HTTPException(status_code=404, detail="Track not found")
-    
-    # Map file types to their corresponding blob name and filename fields
-    file_type_mapping = {
-        "mp3": ("mp3_blob_name", "mp3_filename", "audio.mp3"),
-        "lyrics": ("lyrics_blob_name", "lyrics_filename", "lyrics.txt"),
-        "session": ("session_blob_name", "session_filename", "session_file"),
-        "singer_agreement": ("singer_agreement_blob_name", "singer_agreement_filename", "singer_agreement.pdf"),
-        "music_director_agreement": ("music_director_agreement_blob_name", "music_director_agreement_filename", "music_director_agreement.pdf")
-    }
-    
-    if file_type not in file_type_mapping:
-        raise HTTPException(status_code=400, detail="Invalid file type")
-    
-    blob_name_field, filename_field, default_filename = file_type_mapping[file_type]
-    blob_name = track.get(blob_name_field)
-    filename = track.get(filename_field, default_filename)
-    
-    if not blob_name:
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    try:
-        if stream:
-            # Stream the file content directly from GCS
-            bucket = storage_client.bucket(GCS_BUCKET_NAME)
-            blob = bucket.blob(blob_name)
-            
-            # Define a generator function to stream the content in chunks
-            async def content_stream():
-                try:
-                    # Use download_to_file with a temporary file to enable chunked streaming
-                    chunk_size = 1024 * 1024  # 1MB chunks
-                    # Use blob.download_as_bytes() with start/end for chunked download
-                    total_bytes = blob.size
-                    position = 0
-                    
-                    while position < total_bytes:
-                        end = min(position + chunk_size, total_bytes)
-                        chunk = await asyncio.to_thread(
-                            blob.download_as_bytes,
-                            start=position,
-                            end=end - 1
-                        )
-                        yield chunk
-                        position = end
-                except Exception as e:
-                    logger.exception(f"Failed to stream content from blob {blob_name}")
-                    raise HTTPException(status_code=500, detail=f"Failed to stream file content: {str(e)}") from e
-            
-            headers = {
-                'Content-Disposition': f'attachment; filename="{track["unique_code"]}_{track["title"]}_{filename}"'
-            }
-            return StreamingResponse(content_stream(), headers=headers, media_type='application/octet-stream')
-        else:
-            # Generate a signed URL for the file
-            signed_url = await generate_signed_url(blob_name)
-            return RedirectResponse(url=signed_url)
-            
-    except NotFound:
-        raise HTTPException(status_code=404, detail="File not found in storage")
-    except Exception as e:
-        logger.exception(f"Failed to handle file download for blob: {blob_name}")
-        raise HTTPException(status_code=500, detail=f"Could not process file download: {str(e)}")
+        logger.exception(f"Failed to generate upload URL for {filename}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Include the router in the main app
 app.include_router(api_router)

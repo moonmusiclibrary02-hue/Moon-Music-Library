@@ -1,16 +1,17 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useToast } from '../hooks/use-toast';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Textarea } from './ui/textarea';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { toast } from 'sonner';
 import { Upload, FileAudio, FileText, ArrowLeft, Music, Mic } from 'lucide-react';
 
 const UploadTrack = ({ apiClient }) => {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState({
     rights_type: '',
@@ -116,47 +117,119 @@ const UploadTrack = ({ apiClient }) => {
     }
   };
 
+  const uploadFileToGCS = async (file, folder) => {
+    try {
+      // Step 1: Get signed URL from our backend
+      const formData = new FormData();
+      formData.append('filename', file.name);
+      formData.append('content_type', file.type);
+      formData.append('folder', folder);
+
+      const urlResponse = await fetch('/api/tracks/generate-upload-url', {
+        method: 'POST',
+        body: formData,
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      });
+
+      if (!urlResponse.ok) {
+        throw new Error('Failed to get upload URL');
+      }
+
+      const { signed_url, blob_name } = await urlResponse.json();
+
+      // Step 2: Upload directly to GCS
+      const uploadResponse = await fetch(signed_url, {
+        method: 'PUT',
+        body: file,
+        headers: {
+          'Content-Type': file.type
+        }
+      });
+
+      if (!uploadResponse.ok) {
+        throw new Error('Failed to upload to GCS');
+      }
+
+      return {
+        blob_name,
+        filename: file.name
+      };
+    } catch (error) {
+      console.error('Upload error:', error);
+      throw error;
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
 
     try {
-      const submitData = new FormData();
-      
-      // Add all form fields
-      Object.keys(formData).forEach(key => {
-        if (formData[key]) {
-          submitData.append(key, formData[key]);
-        }
-      });
-      
-      // Add files if selected
+      // Upload all files in parallel
+      const uploadPromises = [];
+      const fileData = {};
+
       if (files.mp3_file) {
-        submitData.append('mp3_file', files.mp3_file);
-      }
-      if (files.lyrics_file) {
-        submitData.append('lyrics_file', files.lyrics_file);
-      }
-      if (files.session_file) {
-        submitData.append('session_file', files.session_file);
-      }
-      if (files.singer_agreement_file) {
-        submitData.append('singer_agreement_file', files.singer_agreement_file);
-      }
-      if (files.music_director_agreement_file) {
-        submitData.append('music_director_agreement_file', files.music_director_agreement_file);
+        uploadPromises.push(
+          uploadFileToGCS(files.mp3_file, 'audio')
+            .then(result => fileData.mp3_file = result)
+        );
       }
 
-      const response = await apiClient.post('/tracks', submitData, {
+      if (files.lyrics_file) {
+        uploadPromises.push(
+          uploadFileToGCS(files.lyrics_file, 'lyrics')
+            .then(result => fileData.lyrics_file = result)
+        );
+      }
+
+      if (files.session_file) {
+        uploadPromises.push(
+          uploadFileToGCS(files.session_file, 'sessions')
+            .then(result => fileData.session_file = result)
+        );
+      }
+
+      // Wait for all uploads to complete
+      await Promise.all(uploadPromises);
+
+      // Create form data with metadata and blob references
+      const formData = new FormData();
+      
+      // Add metadata
+      Object.entries(formData).forEach(([key, value]) => {
+        formData.append(key, value);
+      });
+
+      // Add blob names and filenames
+      if (fileData.mp3_file) {
+        formData.append('mp3_blob_name', fileData.mp3_file.blob_name);
+        formData.append('mp3_filename', fileData.mp3_file.filename);
+      }
+
+      if (fileData.lyrics_file) {
+        formData.append('lyrics_blob_name', fileData.lyrics_file.blob_name);
+        formData.append('lyrics_filename', fileData.lyrics_file.filename);
+      }
+
+      if (fileData.session_file) {
+        formData.append('session_blob_name', fileData.session_file.blob_name);
+        formData.append('session_filename', fileData.session_file.filename);
+      }
+
+      // Submit track metadata to backend
+      const response = await apiClient.post('/tracks', formData, {
         headers: {
-          'Content-Type': 'multipart/form-data'
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
         }
       });
 
       toast.success('Track uploaded successfully!');
       navigate('/');
     } catch (error) {
-      console.error('Upload error:', error);
+      console.error('Submission error:', error);
       const message = error.response?.data?.detail || 'Failed to upload track';
       toast.error(message);
     } finally {
