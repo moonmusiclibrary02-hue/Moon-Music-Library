@@ -162,7 +162,7 @@ const UploadTrack = ({ apiClient }) => {
     }
   };
 
-  const uploadFileToGCS = async (file, folder, signal) => {
+  const uploadFileToGCS = async (file, folder, fileType, signal) => {
     try {
       if (signal?.aborted) {
         throw new Error('Upload aborted');
@@ -250,7 +250,7 @@ const UploadTrack = ({ apiClient }) => {
         });
       };
 
-      const uploadResponse = await uploadWithProgress(signed_url, file, folder, signal);
+      const uploadResponse = await uploadWithProgress(signed_url, file, fileType, signal);
 
       return {
         blob_name,
@@ -293,17 +293,6 @@ const UploadTrack = ({ apiClient }) => {
     }
   };
 
-  // Attempt unauthed cleanup via backend service account
-  const tryServiceCleanup = async (blobs) => {
-    try {
-      await apiClient.post('/tracks/cleanup-unauthed', { blobs });
-      return true;
-    } catch (e) {
-      console.error('Service cleanup failed:', e);
-      return false;
-    }
-  };
-
   const cleanupBlobs = async (blobsToClean) => {
     const token = localStorage.getItem('token');
     if (!token) {
@@ -314,9 +303,6 @@ const UploadTrack = ({ apiClient }) => {
         description: "Upload files will be cleaned up when you sign in again.",
         variant: "warning"
       });
-      
-      // Try server-side cleanup as fallback
-      await tryServiceCleanup(blobsToClean);
       return;
     }
 
@@ -394,7 +380,7 @@ const UploadTrack = ({ apiClient }) => {
           });
         }
 
-        return uploadFileToGCS(file, folder, controller.signal)
+        return uploadFileToGCS(file, folder, fileType, controller.signal)
           .then(result => {
             // Track the blob both for cleanup and future retries
             if (result && result.blob_name) {
@@ -524,30 +510,13 @@ const UploadTrack = ({ apiClient }) => {
       if (uploadedBlobs && Object.keys(uploadedBlobs).length > 0) {
         const blobsToClean = Object.values(uploadedBlobs).filter(Boolean);
         
-        // Save all blobs for potential later cleanup
-        try {
-          // Get existing pending blobs
-          const existingJSON = localStorage.getItem('pendingBlobCleanup') || '[]';
-          const existing = JSON.parse(existingJSON);
-          
-          // Add new blobs, avoid duplicates
-          const combined = [...new Set([...existing, ...blobsToClean])];
-          localStorage.setItem('pendingBlobCleanup', JSON.stringify(combined));
-        } catch (e) {
-          console.error('Error saving pending cleanup:', e);
-        }
+        // Save all blobs for potential later cleanup using helper
+        savePendingCleanup(blobsToClean);
         
         const token = localStorage.getItem('token');
         if (!token) {
           console.error('Authentication token not found during cleanup');
           toast.warning('Upload files will be cleaned up when you sign in again.');
-          
-          // Try server-side cleanup as fallback
-          try {
-            await tryServiceCleanup(blobsToClean);
-          } catch (serviceError) {
-            console.error('Service cleanup failed:', serviceError);
-          }
         } else {
           // Call backend to delete the uploaded blobs
           await Promise.all(blobsToClean.map(async (blob) => {
@@ -559,14 +528,7 @@ const UploadTrack = ({ apiClient }) => {
               });
               
               // Remove from pending cleanup if successful
-              try {
-                const existingJSON = localStorage.getItem('pendingBlobCleanup') || '[]';
-                const existing = JSON.parse(existingJSON);
-                const updated = existing.filter(item => item !== blob);
-                localStorage.setItem('pendingBlobCleanup', JSON.stringify(updated));
-              } catch (e) {
-                console.error('Error updating pending cleanup:', e);
-              }
+              removePendingCleanup(blob);
             } catch (cleanupError) {
               // Log cleanup errors but don't block error handling
               console.error(`Failed to clean up blob ${blob}:`, cleanupError);
