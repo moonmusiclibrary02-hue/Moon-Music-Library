@@ -522,25 +522,58 @@ const UploadTrack = ({ apiClient }) => {
 
       // Clean up any successfully uploaded blobs
       if (uploadedBlobs && Object.keys(uploadedBlobs).length > 0) {
+        const blobsToClean = Object.values(uploadedBlobs).filter(Boolean);
+        
+        // Save all blobs for potential later cleanup
+        try {
+          // Get existing pending blobs
+          const existingJSON = localStorage.getItem('pendingBlobCleanup') || '[]';
+          const existing = JSON.parse(existingJSON);
+          
+          // Add new blobs, avoid duplicates
+          const combined = [...new Set([...existing, ...blobsToClean])];
+          localStorage.setItem('pendingBlobCleanup', JSON.stringify(combined));
+        } catch (e) {
+          console.error('Error saving pending cleanup:', e);
+        }
+        
         const token = localStorage.getItem('token');
         if (!token) {
           console.error('Authentication token not found during cleanup');
-          return; // Skip cleanup if token is missing
-        }
-
-        // Call backend to delete the uploaded blobs
-        await Promise.all(Object.values(uploadedBlobs).filter(Boolean).map(async (blob) => {
+          toast.warning('Upload files will be cleaned up when you sign in again.');
+          
+          // Try server-side cleanup as fallback
           try {
-            await apiClient.delete(`/tracks/cleanup-upload/${encodeURIComponent(blob)}`, {
-              headers: {
-                'Authorization': `Bearer ${token}`
-              }
-            });
-          } catch (cleanupError) {
-            // Log cleanup errors but don't block error handling
-            console.error(`Failed to clean up blob ${blob}:`, cleanupError);
+            await tryServiceCleanup(blobsToClean);
+          } catch (serviceError) {
+            console.error('Service cleanup failed:', serviceError);
           }
-        }));
+        } else {
+          // Call backend to delete the uploaded blobs
+          await Promise.all(blobsToClean.map(async (blob) => {
+            try {
+              await apiClient.delete(`/tracks/cleanup-upload/${encodeURIComponent(blob)}`, {
+                headers: {
+                  'Authorization': `Bearer ${token}`
+                }
+              });
+              
+              // Remove from pending cleanup if successful
+              try {
+                const existingJSON = localStorage.getItem('pendingBlobCleanup') || '[]';
+                const existing = JSON.parse(existingJSON);
+                const updated = existing.filter(item => item !== blob);
+                localStorage.setItem('pendingBlobCleanup', JSON.stringify(updated));
+              } catch (e) {
+                console.error('Error updating pending cleanup:', e);
+              }
+            } catch (cleanupError) {
+              // Log cleanup errors but don't block error handling
+              console.error(`Failed to clean up blob ${blob}:`, cleanupError);
+              // Blob will remain in pendingBlobCleanup for future retry
+            }
+          }));
+        }
       }
 
       toast.error(message);

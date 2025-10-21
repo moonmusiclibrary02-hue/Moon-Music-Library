@@ -1912,15 +1912,9 @@ async def cleanup_upload(
             detail="Permission denied to delete file"
         )
         
-    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit) as e:
-        # Don't catch system-level exceptions
-        raise
-        
     except Exception as e:
         # Log unexpected errors but don't expose details to client
-        logger.exception(f"Failed to clean up blob {blob_name}: {str(e)}")
-        if isinstance(e, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
-            raise
+        logger.exception("Failed to clean up blob", extra={"blob_name": blob_name})
         raise HTTPException(
             status_code=500,
             detail="Failed to clean up file"
