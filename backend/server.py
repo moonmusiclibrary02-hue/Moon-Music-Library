@@ -1903,14 +1903,14 @@ async def cleanup_upload(
         raise HTTPException(
             status_code=404,
             detail="File not found"
-        )
+        ) from None
         
     except PermissionDenied:
         # Permission issues with GCS
         raise HTTPException(
             status_code=403,
             detail="Permission denied to delete file"
-        )
+        ) from None
         
     except Exception as e:
         # Log unexpected errors but don't expose details to client
@@ -1918,7 +1918,7 @@ async def cleanup_upload(
         raise HTTPException(
             status_code=500,
             detail="Failed to clean up file"
-        ) from e
+        ) from None
 
 # Include the router in the main app
 app.include_router(api_router)

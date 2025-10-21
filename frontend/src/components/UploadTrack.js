@@ -352,15 +352,16 @@ const UploadTrack = ({ apiClient }) => {
       if (existingBlobs.length > 0) {
         toast.info('Cleaning up previous upload attempt...');
         await cleanupBlobs(existingBlobs);
-        // Reset upload tracking state
-        setUploadedBlobs({
-          mp3_file: null,
-          lyrics_file: null,
-          session_file: null,
-          singer_agreement_file: null,
-          music_director_agreement_file: null
-        });
       }
+      
+      // Reset upload tracking state synchronously to prevent race conditions
+      setUploadedBlobs({
+        mp3_file: null,
+        lyrics_file: null,
+        session_file: null,
+        singer_agreement_file: null,
+        music_director_agreement_file: null
+      });
 
       // Upload all files in parallel with coordinated abort
       const uploadPromises = [];
@@ -370,16 +371,6 @@ const UploadTrack = ({ apiClient }) => {
 
       // Helper to create an upload promise that handles both success and failure
       const createUploadPromise = (file, folder, fileType) => {
-        // Check if we already have an uploaded blob for this file
-        if (uploadedBlobs[fileType]) {
-          console.log(`Using existing upload for ${fileType}`);
-          return Promise.resolve({
-            fileType,
-            blob_name: uploadedBlobs[fileType],
-            filename: file.name
-          });
-        }
-
         return uploadFileToGCS(file, folder, fileType, controller.signal)
           .then(result => {
             // Track the blob both for cleanup and future retries
@@ -393,6 +384,8 @@ const UploadTrack = ({ apiClient }) => {
             return { ...result, fileType };
           })
           .catch(err => {
+            // Abort other uploads when one fails
+            controller.abort();
             // Wrap error with fileType
             throw { reason: err, fileType };
           });
