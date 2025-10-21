@@ -310,11 +310,11 @@ const UploadTrack = ({ apiClient }) => {
         // Check if we already have an uploaded blob for this file
         if (uploadedBlobs[fileType]) {
           console.log(`Using existing upload for ${fileType}`);
-          return {
+          return Promise.resolve({
             fileType,
             blob_name: uploadedBlobs[fileType],
             filename: file.name
-          };
+          });
         }
 
         return uploadFileToGCS(file, folder, controller.signal)
@@ -328,6 +328,11 @@ const UploadTrack = ({ apiClient }) => {
               }));
             }
             return { ...result, fileType };
+          })
+          .catch(err => {
+            // Wrap error with fileType
+            throw { reason: err, fileType };
+          });
           });
       };
 
@@ -383,8 +388,8 @@ const UploadTrack = ({ apiClient }) => {
           setUploadedBlobs(prev => {
             const newState = { ...prev };
             failures.forEach(failure => {
-              if (failure.fileType) {
-                newState[failure.fileType] = null;
+              if (failure.value?.fileType || failure.reason?.fileType) {
+                newState[failure.value?.fileType || failure.reason?.fileType] = null;
               }
             });
             return newState;
@@ -392,14 +397,16 @@ const UploadTrack = ({ apiClient }) => {
           setUploadProgress(prev => {
             const newProgress = { ...prev };
             failures.forEach(failure => {
-              if (failure.fileType) {
-                newProgress[failure.fileType] = 0;
+              if (failure.value?.fileType || failure.reason?.fileType) {
+                newProgress[failure.value?.fileType || failure.reason?.fileType] = 0;
               }
             });
             return newProgress;
           });
         }
-        const error = failures[0].value?.reason || failures[0].reason;
+        // Get the original error from the wrapped structure
+        const firstFailure = failures[0];
+        const error = firstFailure.reason?.reason || firstFailure.value?.reason || firstFailure.reason;
         throw error;
       }
 
@@ -414,13 +421,7 @@ const UploadTrack = ({ apiClient }) => {
       });
 
       // Map of file types to their corresponding form field names
-      const blobFieldMap = {
-        mp3_file: ['mp3_blob_name', 'mp3_filename'],
-        lyrics_file: ['lyrics_blob_name', 'lyrics_filename'],
-        session_file: ['session_blob_name', 'session_filename'],
-        singer_agreement_file: ['singer_agreement_blob_name', 'singer_agreement_filename'],
-        music_director_agreement_file: ['music_director_agreement_blob_name', 'music_director_agreement_filename']
-      };
+
 
       // Add blob names and filenames
       Object.entries(fileData).forEach(([fileType, data]) => {
@@ -454,14 +455,14 @@ const UploadTrack = ({ apiClient }) => {
         // Call backend to delete the uploaded blobs
         await Promise.all(Object.values(uploadedBlobs).filter(Boolean).map(async (blob) => {
           try {
-            await apiClient.delete(`/tracks/cleanup-upload/${encodeURIComponent(blob.blob_name)}`, {
+            await apiClient.delete(`/tracks/cleanup-upload/${encodeURIComponent(blob)}`, {
               headers: {
                 'Authorization': `Bearer ${token}`
               }
             });
           } catch (cleanupError) {
             // Log cleanup errors but don't block error handling
-            console.error(`Failed to clean up blob ${blob.blob_name}:`, cleanupError);
+            console.error(`Failed to clean up blob ${blob}:`, cleanupError);
           }
         }));
       }

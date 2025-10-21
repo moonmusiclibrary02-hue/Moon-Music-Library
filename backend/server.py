@@ -907,27 +907,67 @@ async def process_bulk_upload_row(row_data, row_number, current_user):
 
 # Rate limiter setup
 class RateLimiter:
-    def __init__(self, max_requests: int, time_window: int):
+    """Thread-safe in-memory rate limiter.
+    
+    WARNING: This implementation is suitable for development and single-process deployments only.
+    For production/multi-process deployments, replace with a distributed rate limiter using Redis
+    or similar to ensure limits are enforced across all workers.
+    
+    Example Redis implementation:
+    https://redis.io/commands/incr
+    """
+    
+    def __init__(self, max_requests: int, time_window: int, max_users: int = 10000):
         self.max_requests = max_requests
         self.time_window = time_window  # in seconds
+        self.max_users = max_users  # Threshold for cleanup
         self.requests = {}
-
-    async def is_allowed(self, user_id: str) -> bool:
+        self.lock = threading.Lock()
+    
+    def _cleanup_old_requests(self, now: float, user_id: str = None) -> None:
+        """Remove expired requests for given user or all users if dict too large"""
+        if user_id is not None:
+            # Clean specific user's requests
+            requests = self.requests.get(user_id, [])
+            active = [ts for ts in requests if now - ts < self.time_window]
+            if active:
+                self.requests[user_id] = active
+            else:
+                self.requests.pop(user_id, None)
+        elif len(self.requests) > self.max_users:
+            # Bulk cleanup when too many users
+            active_users = {}
+            for uid, timestamps in self.requests.items():
+                active = [ts for ts in timestamps if now - ts < self.time_window]
+                if active:
+                    active_users[uid] = active
+            self.requests = active_users
+    
+    def is_allowed(self, user_id: str) -> bool:
         now = time.time()
-        user_requests = self.requests.get(user_id, [])
         
-        # Clean up old requests
-        user_requests = [req_time for req_time in user_requests if now - req_time < self.time_window]
-        
-        if len(user_requests) >= self.max_requests:
-            return False
-        
-        user_requests.append(now)
-        self.requests[user_id] = user_requests
-        return True
+        with self.lock:
+            # Clean expired requests for this user
+            self._cleanup_old_requests(now, user_id)
+            
+            # Check rate limit
+            user_requests = self.requests.get(user_id, [])
+            
+            if len(user_requests) >= self.max_requests:
+                return False
+            
+            # Record new request
+            user_requests.append(now)
+            self.requests[user_id] = user_requests
+            
+            # Periodic cleanup of all users when threshold reached
+            if len(self.requests) > self.max_users:
+                self._cleanup_old_requests(now)
+            
+            return True
 
-# Initialize rate limiter (15 requests per minute per user)
-upload_rate_limiter = RateLimiter(max_requests=15, time_window=60)
+# Initialize rate limiter (15 requests per minute per user, cleanup at 10k users)
+upload_rate_limiter = RateLimiter(max_requests=15, time_window=60, max_users=10000)
 
 async def require_upload_permission(folder: str, current_user: User):
     """Validate user's permission to upload to specific folder"""
@@ -940,11 +980,17 @@ async def require_upload_permission(folder: str, current_user: User):
             detail="Only managers and admins can upload files"
         )
     
-    # For managers, ensure they're only uploading to their assigned language folders
-    # This assumes folders are language-specific, adjust logic if needed
-    if folder == "audio" and current_user.manager_id:
+    # Check manager exists and is active before any folder access
+    if current_user.manager_id:
         manager = await db.managers.find_one({"id": current_user.manager_id})
         if not manager or not manager.get("is_active"):
+            raise HTTPException(
+                status_code=403,
+                detail="Manager account is inactive"
+            )
+        
+        # Folder-specific access control can be added here if needed
+        if folder == "audio":
             raise HTTPException(
                 status_code=403,
                 detail="Manager account is inactive"
@@ -952,23 +998,31 @@ async def require_upload_permission(folder: str, current_user: User):
 
 def sanitize_filename(filename: str) -> str:
     """Sanitize filename for safe storage"""
-    # Remove path components
+    # Get basename and split into name and extension
     filename = os.path.basename(filename)
-    
-    # Restrict length (max 255 chars including extension)
     name, ext = os.path.splitext(filename)
-    if len(filename) > 255:
-        name = name[:255 - len(ext)]
-        filename = name + ext
     
-    # Replace unsafe characters, preserve extension
-    safe_chars = set(string.ascii_letters + string.digits + '.-_')
-    name = ''.join(c if c in safe_chars else '_' for c in name)
+    # Define safe characters
+    name_safe_chars = set(string.ascii_letters + string.digits + '-_')
+    ext_safe_chars = set(string.ascii_letters + string.digits + '.')
     
-    # Ensure filename isn't empty after sanitization
+    # Clean and validate name part
+    name = name.strip('.')  # Remove leading/trailing dots
+    name = ''.join(c if c in name_safe_chars else '_' for c in name)
+    name = '_'.join(filter(None, name.split('.')))  # Collapse multiple dots
     if not name:
         name = 'unnamed'
     
+    # Clean and validate extension
+    ext = ext.lstrip('.')  # Remove leading dot
+    if ext:
+        ext = ''.join(c if c in ext_safe_chars else '_' for c in ext)[:10]  # Limit ext length
+        ext = '.' + ext if ext else ''  # Add back one dot if we have an extension
+    
+    # Enforce total length limit while preserving extension
+    if len(name) + len(ext) > 255:
+        name = name[:255 - len(ext)]
+        
     return name + ext
 
 # Routes
@@ -1842,13 +1896,33 @@ async def cleanup_upload(
         logger.info(f"Successfully cleaned up blob {blob_name} for user {current_user.id}")
         return {"message": "File cleaned up successfully"}
         
+    except NotFound:
+        # File already deleted or doesn't exist
+        raise HTTPException(
+            status_code=404,
+            detail="File not found"
+        )
+        
+    except PermissionDenied:
+        # Permission issues with GCS
+        raise HTTPException(
+            status_code=403,
+            detail="Permission denied to delete file"
+        )
+        
+    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit) as e:
+        # Don't catch system-level exceptions
+        raise
+        
     except Exception as e:
-        logger.exception(f"Failed to clean up blob {blob_name}")
-        # Don't expose internal error details to the client
+        # Log unexpected errors but don't expose details to client
+        logger.exception(f"Failed to clean up blob {blob_name}: {str(e)}")
+        if isinstance(e, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+            raise
         raise HTTPException(
             status_code=500,
             detail="Failed to clean up file"
-        )
+        ) from e
 
 # Include the router in the main app
 app.include_router(api_router)
