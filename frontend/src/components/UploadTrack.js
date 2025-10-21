@@ -111,6 +111,38 @@ const UploadTrack = ({ apiClient }) => {
     music_director_agreement_file: 0
   });
   
+  // Define cleanupBlobs before useEffect that uses it
+  const cleanupBlobs = useCallback(async (blobsToClean) => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      // Save for later retry and notify user
+      savePendingCleanup(blobsToClean);
+      toast({
+        title: "Cleanup warning",
+        description: "Upload files will be cleaned up when you sign in again.",
+        variant: "warning"
+      });
+      return;
+    }
+
+    // Process each blob with individual try/catch to handle partial failures
+    await Promise.all(blobsToClean.map(async (blobName) => {
+      try {
+        await apiClient.delete(`/tracks/cleanup-upload/${encodeURIComponent(blobName)}`, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+        // Remove from pending cleanup if successful
+        removePendingCleanup(blobName);
+      } catch (cleanupError) {
+        console.error(`Failed to clean up blob ${blobName}:`, cleanupError);
+        // Save failed cleanups for later retry
+        savePendingCleanup([blobName]);
+      }
+    }));
+  }, [apiClient, toast]);
+  
   // Check for pending cleanups on component mount
   useEffect(() => {
     const retryPendingCleanups = async () => {
@@ -319,37 +351,6 @@ const UploadTrack = ({ apiClient }) => {
       throw error;
     }
   };
-
-  const cleanupBlobs = useCallback(async (blobsToClean) => {
-    const token = localStorage.getItem('token');
-    if (!token) {
-      // Save for later retry and notify user
-      savePendingCleanup(blobsToClean);
-      toast({
-        title: "Cleanup warning",
-        description: "Upload files will be cleaned up when you sign in again.",
-        variant: "warning"
-      });
-      return;
-    }
-
-    // Process each blob with individual try/catch to handle partial failures
-    await Promise.all(blobsToClean.map(async (blobName) => {
-      try {
-        await apiClient.delete(`/tracks/cleanup-upload/${encodeURIComponent(blobName)}`, {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
-        });
-        // Remove from pending cleanup if successful
-        removePendingCleanup(blobName);
-      } catch (cleanupError) {
-        console.error(`Failed to clean up blob ${blobName}:`, cleanupError);
-        // Save failed cleanups for later retry
-        savePendingCleanup([blobName]);
-      }
-    }));
-  }, [apiClient, toast]);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
