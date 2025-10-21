@@ -9,6 +9,55 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Upload, FileAudio, FileText, ArrowLeft, Music, Mic } from 'lucide-react';
 
+// Constants and helper functions moved outside component
+// Map of file types to their corresponding form field names
+const blobFieldMap = {
+  mp3_file: ['mp3_blob_name', 'mp3_filename'],
+  lyrics_file: ['lyrics_blob_name', 'lyrics_filename'],
+  session_file: ['session_blob_name', 'session_filename'],
+  singer_agreement_file: ['singer_agreement_blob_name', 'singer_agreement_filename'],
+  music_director_agreement_file: ['music_director_agreement_blob_name', 'music_director_agreement_filename']
+};
+
+// Helper function to format file size
+const formatFileSize = (bytes) => {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+};
+
+// Save pending cleanup blobs to localStorage for retry
+const savePendingCleanup = (blobs) => {
+  try {
+    // Get existing pending blobs
+    const existingJSON = localStorage.getItem('pendingBlobCleanup') || '[]';
+    const existing = JSON.parse(existingJSON);
+    
+    // Add new blobs, avoid duplicates
+    const combined = [...new Set([...existing, ...blobs])];
+    localStorage.setItem('pendingBlobCleanup', JSON.stringify(combined));
+    
+    return combined;
+  } catch (e) {
+    console.error('Error saving pending cleanup:', e);
+    return [];
+  }
+};
+
+// Remove successfully cleaned blobs from the pending list
+const removePendingCleanup = (blobName) => {
+  try {
+    const existingJSON = localStorage.getItem('pendingBlobCleanup') || '[]';
+    const existing = JSON.parse(existingJSON);
+    const updated = existing.filter(blob => blob !== blobName);
+    localStorage.setItem('pendingBlobCleanup', JSON.stringify(updated));
+  } catch (e) {
+    console.error('Error updating pending cleanup:', e);
+  }
+};
+
 const UploadTrack = ({ apiClient }) => {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -271,37 +320,6 @@ const UploadTrack = ({ apiClient }) => {
     }
   };
 
-  // Helper function to clean up blobs
-  // Save pending cleanup blobs to localStorage for retry
-  const savePendingCleanup = (blobs) => {
-    try {
-      // Get existing pending blobs
-      const existingJSON = localStorage.getItem('pendingBlobCleanup') || '[]';
-      const existing = JSON.parse(existingJSON);
-      
-      // Add new blobs, avoid duplicates
-      const combined = [...new Set([...existing, ...blobs])];
-      localStorage.setItem('pendingBlobCleanup', JSON.stringify(combined));
-      
-      return combined;
-    } catch (e) {
-      console.error('Error saving pending cleanup:', e);
-      return [];
-    }
-  };
-  
-  // Remove successfully cleaned blobs from the pending list
-  const removePendingCleanup = (blobName) => {
-    try {
-      const existingJSON = localStorage.getItem('pendingBlobCleanup') || '[]';
-      const existing = JSON.parse(existingJSON);
-      const updated = existing.filter(blob => blob !== blobName);
-      localStorage.setItem('pendingBlobCleanup', JSON.stringify(updated));
-    } catch (e) {
-      console.error('Error updating pending cleanup:', e);
-    }
-  };
-
   const cleanupBlobs = useCallback(async (blobsToClean) => {
     const token = localStorage.getItem('token');
     if (!token) {
@@ -332,16 +350,6 @@ const UploadTrack = ({ apiClient }) => {
       }
     }));
   }, [apiClient, toast]);
-
-
-  // Map of file types to their corresponding form field names
-  const blobFieldMap = {
-    mp3_file: ['mp3_blob_name', 'mp3_filename'],
-    lyrics_file: ['lyrics_blob_name', 'lyrics_filename'],
-    session_file: ['session_blob_name', 'session_filename'],
-    singer_agreement_file: ['singer_agreement_blob_name', 'singer_agreement_filename'],
-    music_director_agreement_file: ['music_director_agreement_blob_name', 'music_director_agreement_filename']
-  };
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -554,14 +562,6 @@ const UploadTrack = ({ apiClient }) => {
         </div>
       </div>
     );
-  };
-
-  const formatFileSize = (bytes) => {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
   return (
