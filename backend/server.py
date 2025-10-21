@@ -5,7 +5,7 @@ from fastapi.responses import FileResponse, Response, RedirectResponse, Streamin
 from io import BytesIO
 from dotenv import load_dotenv
 import tempfile
-from google.cloud.exceptions import NotFound
+from google.cloud.exceptions import NotFound, PermissionDenied
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import hashlib
@@ -13,6 +13,9 @@ from jose import JWTError, jwt
 from datetime import datetime, timedelta, timezone
 import os
 import logging
+import string
+import threading
+import time
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -903,6 +906,127 @@ async def process_bulk_upload_row(row_data, row_number, current_user):
         logger.error(f"Error processing row {row_number}: {e}")
         return None, f"Unexpected error: {str(e)}"
 
+# Rate limiter setup
+class RateLimiter:
+    """Thread-safe in-memory rate limiter.
+    
+    WARNING: This implementation is suitable for development and single-process deployments only.
+    For production/multi-process deployments, replace with a distributed rate limiter using Redis
+    or similar to ensure limits are enforced across all workers.
+    
+    Example Redis implementation:
+    https://redis.io/commands/incr
+    """
+    
+    def __init__(self, max_requests: int, time_window: int, max_users: int = 10000):
+        self.max_requests = max_requests
+        self.time_window = time_window  # in seconds
+        self.max_users = max_users  # Threshold for cleanup
+        self.requests = {}
+        self.lock = threading.Lock()
+    
+    def _cleanup_old_requests(self, now: float, user_id: Optional[str] = None) -> None:
+        """Remove expired requests for given user or all users if dict too large"""
+        if user_id is not None:
+            # Clean specific user's requests
+            requests = self.requests.get(user_id, [])
+            active = [ts for ts in requests if now - ts < self.time_window]
+            if active:
+                self.requests[user_id] = active
+            else:
+                self.requests.pop(user_id, None)
+        elif len(self.requests) > self.max_users:
+            # Bulk cleanup when too many users
+            active_users = {}
+            for uid, timestamps in self.requests.items():
+                active = [ts for ts in timestamps if now - ts < self.time_window]
+                if active:
+                    active_users[uid] = active
+            self.requests = active_users
+    
+    def is_allowed(self, user_id: str) -> bool:
+        now = time.time()
+        
+        with self.lock:
+            # Clean expired requests for this user
+            self._cleanup_old_requests(now, user_id)
+            
+            # Check rate limit
+            user_requests = self.requests.get(user_id, [])
+            
+            if len(user_requests) >= self.max_requests:
+                return False
+            
+            # Record new request
+            user_requests.append(now)
+            self.requests[user_id] = user_requests
+            
+            # Periodic cleanup of all users when threshold reached
+            if len(self.requests) > self.max_users:
+                self._cleanup_old_requests(now)
+            
+            return True
+
+# Initialize rate limiter (15 requests per minute per user, cleanup at 10k users)
+upload_rate_limiter = RateLimiter(max_requests=15, time_window=60, max_users=10000)
+
+async def require_upload_permission(folder: str, current_user: User):
+    """Validate user's permission to upload to specific folder"""
+    if current_user.user_type == "admin":
+        return  # Admins have full access
+    
+    if current_user.user_type != "manager":
+        raise HTTPException(
+            status_code=403,
+            detail="Only managers and admins can upload files"
+        )
+    
+    # Check manager exists and is active before any folder access
+    if current_user.manager_id:
+        manager = await db.managers.find_one({"id": current_user.manager_id})
+        if not manager or not manager.get("is_active"):
+            raise HTTPException(
+                status_code=403,
+                detail="Manager account is inactive"
+            )
+        
+        # Folder-specific access control can be added here if needed
+        # Example: Restrict manager access to specific folders if required
+        # if folder == "audio" and not manager.get("has_audio_access", False):
+        #     raise HTTPException(
+        #         status_code=403,
+        #         detail="Access to audio folder is not permitted for this manager"
+        #     )
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename for safe storage"""
+    # Get basename and split into name and extension
+    filename = os.path.basename(filename)
+    name, ext = os.path.splitext(filename)
+    
+    # Define safe characters
+    name_safe_chars = set(string.ascii_letters + string.digits + '-_')
+    ext_safe_chars = set(string.ascii_letters + string.digits + '.')
+    
+    # Clean and validate name part
+    name = name.strip('.')  # Remove leading/trailing dots
+    name = ''.join(c if c in name_safe_chars else '_' for c in name)
+    name = '_'.join(filter(None, name.split('.')))  # Collapse multiple dots
+    if not name:
+        name = 'unnamed'
+    
+    # Clean and validate extension
+    ext = ext.lstrip('.')  # Remove leading dot
+    if ext:
+        ext = ''.join(c if c in ext_safe_chars else '_' for c in ext)[:10]  # Limit ext length
+        ext = '.' + ext if ext else ''  # Add back one dot if we have an extension
+    
+    # Enforce total length limit while preserving extension
+    if len(name) + len(ext) > 255:
+        name = name[:255 - len(ext)]
+        
+    return name + ext
+
 # Routes
 @api_router.post("/auth/register", response_model=User)
 async def register(user_data: UserCreate):
@@ -1619,7 +1743,7 @@ async def get_next_unique_code(full_prefix: str, current_user: User = Depends(ge
         # If exists, try next number
         next_number += 1
         unique_code = f"{language_code}-{prefix}{next_number:04d}"
-    
+    logger.info(f"Generated unique code: {unique_code} for prefix: {full_prefix}")
     return {"unique_code": unique_code}
 
 @api_router.put("/tracks/{track_id}", response_model=MusicTrack)
@@ -1646,187 +1770,155 @@ async def update_track(
     updated_track = await db.tracks.find_one({"id": track_id})
     return MusicTrack(**parse_from_mongo(updated_track))
 
-# (obsolete code removed)
-@api_router.get("/tracks/bulk-upload/template")
-async def download_bulk_upload_template(current_user: User = Depends(get_current_user)):
-    """Download Excel template for bulk upload"""
-    try:
-        logger.info(f"Template download requested by user: {current_user.email}")
-        wb = generate_excel_template()
-        
-        # Save to bytes
-        excel_buffer = io.BytesIO()
-        wb.save(excel_buffer)
-        excel_buffer.seek(0)
-        
-        content = excel_buffer.getvalue()
-        logger.info(f"Template generated successfully, size: {len(content)} bytes")
-        
-        return Response(
-            content,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=bulk_tracks_template.xlsx"}
+@api_router.post("/tracks/generate-upload-url")
+async def generate_upload_url(
+    filename: str = Form(...),
+    content_type: str = Form(...),
+    folder: str = Form(...),
+    current_user: User = Depends(get_current_user)
+):
+    """Generate a signed URL for direct-to-GCS file upload"""
+    # Check rate limit
+    if not upload_rate_limiter.is_allowed(current_user.id):
+        raise HTTPException(
+            status_code=429,
+            detail="Upload rate limit exceeded. Please try again later."
         )
-    except Exception as e:
-        logger.error(f"Error generating template: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Failed to generate template: {str(e)}")
 
-@api_router.post("/tracks/bulk-upload", response_model=BulkUploadResponse)
-async def bulk_upload_tracks(
-    file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user)
-):
-    """Bulk upload tracks from Excel file"""
-    if not file.filename.lower().endswith(('.xlsx', '.xls')):
-        raise HTTPException(status_code=400, detail="File must be an Excel file (.xlsx or .xls)")
-    
-    try:
-        # Read Excel file
-        contents = await file.read()
-        
-        # Create a temporary file to read with pandas
-        excel_buffer = io.BytesIO(contents)
-        df = pd.read_excel(excel_buffer, sheet_name=0)  # Read first sheet
-        
-        successful_count = 0
-        failed_count = 0
-        errors = []
-        successful_tracks = []
-        
-        # Process each row
-        for index, row in df.iterrows():
-            row_number = index + 2  # +2 because pandas is 0-indexed and Excel header is row 1
-            
-            # Skip empty rows
-            if row.isna().all():
-                continue
-            
-            try:
-                track_id, error = await process_bulk_upload_row(row.to_dict(), row_number, current_user)
-                
-                if error:
-                    failed_count += 1
-                    errors.append({
-                        "row": row_number,
-                        "error": error
-                    })
-                else:
-                    successful_count += 1
-                    successful_tracks.append(track_id)
-                    
-            except Exception as e:
-                failed_count += 1
-                errors.append({
-                    "row": row_number,
-                    "error": f"Unexpected error: {str(e)}"
-                })
-        
-        return BulkUploadResponse(
-            successful_count=successful_count,
-            failed_count=failed_count,
-            errors=errors,
-            successful_tracks=successful_tracks
-        )
-        
-    except Exception as e:
-        logger.error(f"Bulk upload error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to process Excel file: {str(e)}")
+    if not GCS_BUCKET_NAME:
+        raise HTTPException(status_code=500, detail="Storage configuration missing")
 
-@api_router.get("/tracks/{track_id}/lyrics-content")
-async def get_lyrics_content(
-    track_id: str,
-    current_user: User = Depends(get_current_user)
-):
-    track = await db.tracks.find_one({"id": track_id})
-    if not track:
-        raise HTTPException(status_code=404, detail="Track not found")
-    
-    lyrics_blob_name = track.get("lyrics_blob_name")
-    if not lyrics_blob_name:
-        raise HTTPException(status_code=404, detail="Lyrics file not found")
-    
-    try:
-        # Read the lyrics content from GCS
-        content = await read_gcs_text(lyrics_blob_name)
-        return {"content": content, "filename": track.get("lyrics_filename", "lyrics.txt")}
-    except Exception as e:
-        logger.exception(f"Failed to read lyrics from GCS blob: {lyrics_blob_name}")
-        raise HTTPException(status_code=500, detail="Could not read lyrics file")
+    # Validate folder type
+    valid_folders = ['audio', 'lyrics', 'sessions', 'agreements']
+    if folder not in valid_folders:
+        raise HTTPException(status_code=400, detail=f"Invalid folder. Must be one of: {valid_folders}")
 
-@api_router.get("/tracks/{track_id}/download/{file_type}")
-async def download_file(
-    track_id: str,
-    file_type: str,  # 'mp3', 'lyrics', 'session', 'singer_agreement', 'music_director_agreement'
-    stream: bool = False,
-    current_user: User = Depends(get_current_user)
-):
-    track = await db.tracks.find_one({"id": track_id})
-    if not track:
-        raise HTTPException(status_code=404, detail="Track not found")
-    
-    # Map file types to their corresponding blob name and filename fields
-    file_type_mapping = {
-        "mp3": ("mp3_blob_name", "mp3_filename", "audio.mp3"),
-        "lyrics": ("lyrics_blob_name", "lyrics_filename", "lyrics.txt"),
-        "session": ("session_blob_name", "session_filename", "session_file"),
-        "singer_agreement": ("singer_agreement_blob_name", "singer_agreement_filename", "singer_agreement.pdf"),
-        "music_director_agreement": ("music_director_agreement_blob_name", "music_director_agreement_filename", "music_director_agreement.pdf")
+    # Check user's permission for the requested folder
+    await require_upload_permission(folder, current_user)
+
+    # Define allowed MIME types per folder
+    allowed_content_types = {
+        'audio': [
+            'audio/mpeg',
+            'audio/wav',
+            'audio/x-wav',
+            'audio/mp3',
+            'audio/mp4',
+            'audio/x-m4a'
+        ],
+        'lyrics': [
+            'text/plain',
+            'application/pdf',
+            'application/msword',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        ],
+        'sessions': [
+            'application/zip',
+            'application/x-zip-compressed',
+            'application/x-rar-compressed',
+            'application/octet-stream'  # For some ZIP/RAR files
+        ],
+        'agreements': [
+            'application/pdf',
+            'application/msword',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'image/jpeg',
+            'image/png',
+            'image/webp'
+        ]
     }
-    
-    if file_type not in file_type_mapping:
-        raise HTTPException(status_code=400, detail="Invalid file type")
-    
-    blob_name_field, filename_field, default_filename = file_type_mapping[file_type]
-    blob_name = track.get(blob_name_field)
-    filename = track.get(filename_field, default_filename)
-    
-    if not blob_name:
-        raise HTTPException(status_code=404, detail="File not found")
-    
+
+    # Validate content type
+    if not content_type:
+        raise HTTPException(status_code=400, detail="Content type is required")
+
+    if content_type not in allowed_content_types[folder]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid content type for {folder} folder. Allowed types: {', '.join(allowed_content_types[folder])}"
+        )
+
     try:
-        if stream:
-            # Stream the file content directly from GCS
-            bucket = storage_client.bucket(GCS_BUCKET_NAME)
-            blob = bucket.blob(blob_name)
-            
-            # Define a generator function to stream the content in chunks
-            async def content_stream():
-                try:
-                    # Use download_to_file with a temporary file to enable chunked streaming
-                    chunk_size = 1024 * 1024  # 1MB chunks
-                    # Use blob.download_as_bytes() with start/end for chunked download
-                    total_bytes = blob.size
-                    position = 0
-                    
-                    while position < total_bytes:
-                        end = min(position + chunk_size, total_bytes)
-                        chunk = await asyncio.to_thread(
-                            blob.download_as_bytes,
-                            start=position,
-                            end=end - 1
-                        )
-                        yield chunk
-                        position = end
-                except Exception as e:
-                    logger.exception(f"Failed to stream content from blob {blob_name}")
-                    raise HTTPException(status_code=500, detail=f"Failed to stream file content: {str(e)}") from e
-            
-            headers = {
-                'Content-Disposition': f'attachment; filename="{track["unique_code"]}_{track["title"]}_{filename}"'
-            }
-            return StreamingResponse(content_stream(), headers=headers, media_type='application/octet-stream')
-        else:
-            # Generate a signed URL for the file
-            signed_url = await generate_signed_url(blob_name)
-            return RedirectResponse(url=signed_url)
-            
-    except NotFound:
-        raise HTTPException(status_code=404, detail="File not found in storage")
+        # Sanitize filename
+        safe_filename = sanitize_filename(filename)
+        
+        # Generate unique blob name with UUID and sanitized filename
+        blob_name = f"{folder}/{uuid.uuid4()}_{safe_filename}"
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_name)
+
+        # Generate v4 signed URL for upload, valid for 15 minutes
+        signed_url = await asyncio.to_thread(
+            blob.generate_signed_url,
+            expiration=timedelta(minutes=15),
+            method="PUT",
+            version="v4",
+            content_type=content_type,
+        )
+
+        # Log upload URL generation for audit
+        logger.info(f"Generated upload URL for user {current_user.id} - folder: {folder}, file: {safe_filename}")
+
     except Exception as e:
-        logger.exception(f"Failed to handle file download for blob: {blob_name}")
-        raise HTTPException(status_code=500, detail=f"Could not process file download: {str(e)}")
+        logger.exception(f"Failed to generate upload URL for {filename}")
+        raise HTTPException(status_code=500, detail="Failed to generate upload URL") from e
+
+    
+    return {
+            "signed_url": signed_url,
+            "blob_name": blob_name,
+            "filename": filename
+    }
+
+@api_router.delete("/tracks/cleanup-upload/{blob_name:path}")
+async def cleanup_upload(
+    blob_name: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Delete an uploaded file from GCS storage"""
+    if not blob_name:
+        raise HTTPException(status_code=400, detail="Blob name is required")
+
+    # Validate blob path structure
+    valid_folders = ['audio', 'lyrics', 'sessions', 'agreements']
+    folder = blob_name.split('/')[0] if '/' in blob_name else None
+    
+    if not folder or folder not in valid_folders:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid blob path. Must start with one of: {valid_folders}"
+        )
+
+    # Check user's permission for the folder
+    await require_upload_permission(folder, current_user)
+
+    try:
+        # Attempt to delete the blob
+        await delete_from_gcs(blob_name)
+        logger.info(f"Successfully cleaned up blob {blob_name} for user {current_user.id}")
+        return {"message": "File cleaned up successfully"}
+        
+    except NotFound:
+        # File already deleted or doesn't exist
+        raise HTTPException(
+            status_code=404,
+            detail="File not found"
+        ) from None
+        
+    except PermissionDenied:
+        # Permission issues with GCS
+        raise HTTPException(
+            status_code=403,
+            detail="Permission denied to delete file"
+        ) from None
+        
+    except Exception as e:
+        # Log unexpected errors but don't expose details to client
+        logger.exception("Failed to clean up blob", extra={"blob_name": blob_name})
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to clean up file"
+        ) from None
 
 # Include the router in the main app
 app.include_router(api_router)

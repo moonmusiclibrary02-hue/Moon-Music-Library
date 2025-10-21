@@ -1,16 +1,17 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useToast } from '../hooks/use-toast';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Textarea } from './ui/textarea';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { toast } from 'sonner';
 import { Upload, FileAudio, FileText, ArrowLeft, Music, Mic } from 'lucide-react';
 
 const UploadTrack = ({ apiClient }) => {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState({
     rights_type: '',
@@ -33,6 +34,55 @@ const UploadTrack = ({ apiClient }) => {
     singer_agreement_file: null,
     music_director_agreement_file: null
   });
+
+  // Track uploaded blobs for retry handling
+  const [uploadedBlobs, setUploadedBlobs] = useState({
+    mp3_file: null,
+    lyrics_file: null,
+    session_file: null,
+    singer_agreement_file: null,
+    music_director_agreement_file: null
+  });
+
+  // Ref to track uploaded blobs synchronously (avoids stale state issues)
+  const uploadedBlobsRef = useRef({
+    mp3_file: null,
+    lyrics_file: null,
+    session_file: null,
+    singer_agreement_file: null,
+    music_director_agreement_file: null
+  });
+
+  // Track upload progress for each file
+  const [uploadProgress, setUploadProgress] = useState({
+    mp3_file: 0,
+    lyrics_file: 0,
+    session_file: 0,
+    singer_agreement_file: 0,
+    music_director_agreement_file: 0
+  });
+  
+  // Check for pending cleanups on component mount
+  useEffect(() => {
+    const retryPendingCleanups = async () => {
+      try {
+        const pendingJSON = localStorage.getItem('pendingBlobCleanup');
+        if (!pendingJSON) return;
+        
+        const pending = JSON.parse(pendingJSON);
+        if (pending.length > 0) {
+          console.log(`Retrying cleanup for ${pending.length} blobs`);
+          await cleanupBlobs(pending);
+        }
+      } catch (e) {
+        console.error('Error retrying pending cleanups:', e);
+      }
+    };
+    
+    // Wait a moment for auth to be ready
+    const timer = setTimeout(() => retryPendingCleanups(), 2000);
+    return () => clearTimeout(timer);
+  }, [cleanupBlobs]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -105,6 +155,11 @@ const UploadTrack = ({ apiClient }) => {
       
       console.log('File accepted, updating state');
       setFiles(prev => ({ ...prev, [fileType]: file }));
+      // Reset progress when new file is selected
+      setUploadProgress(prev => ({
+        ...prev,
+        [fileType]: 0
+      }));
       const fileTypeLabel = fileType === 'mp3_file' ? 'Audio' : 
                             fileType === 'session_file' ? 'Session' : 
                             fileType === 'lyrics_file' ? 'Lyrics' :
@@ -116,52 +171,389 @@ const UploadTrack = ({ apiClient }) => {
     }
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const uploadFileToGCS = async (file, folder, fileType, signal) => {
+    try {
+      if (signal?.aborted) {
+        throw new Error('Upload aborted');
+      }
+
+      // Step 1: Get signed URL from our backend
+      const token = localStorage.getItem('token');
+      if (!token) {
+        throw new Error('Authentication token not found. Please log in again.');
+      }
+
+      const formData = new FormData();
+      formData.append('filename', file.name);
+      formData.append('content_type', file.type);
+      formData.append('folder', folder);
+
+      const urlResponse = await apiClient.post('/tracks/generate-upload-url', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+          'Authorization': `Bearer ${token}`
+        },
+        signal // Pass signal to apiClient for URL generation
+      });
+
+      const { signed_url, blob_name } = urlResponse.data;
+
+      // Check for abort before starting GCS upload
+      if (signal?.aborted) {
+        throw new Error('Upload aborted');
+      }
+
+      // Step 2: Upload directly to GCS with progress tracking
+      const uploadWithProgress = (url, file, fileType, signal) => {
+        return new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          
+          // Handle abort signal
+          if (signal) {
+            if (signal.aborted) {
+              reject(new Error('Upload aborted'));
+              return;
+            }
+            signal.addEventListener('abort', () => xhr.abort());
+          }
+
+          xhr.upload.addEventListener('progress', (event) => {
+            if (event.lengthComputable) {
+              const percentComplete = Math.round((event.loaded / event.total) * 100);
+              setUploadProgress(prev => ({
+                ...prev,
+                [fileType]: percentComplete
+              }));
+            }
+          });
+
+          xhr.addEventListener('load', () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve({
+                status: xhr.status,
+                ok: true
+              });
+            } else {
+              let errorDetails = `${xhr.status} ${xhr.statusText}`;
+              if (xhr.responseText) {
+                const bodySnippet = xhr.responseText.slice(0, 200);
+                errorDetails += bodySnippet.length > 200 ? 
+                  ` - ${bodySnippet}... (truncated)` : 
+                  ` - ${bodySnippet}`;
+              }
+              reject(new Error(`Failed to upload to GCS: ${errorDetails}`));
+            }
+          });
+
+          xhr.addEventListener('error', () => {
+            reject(new Error('Network error occurred during upload'));
+          });
+
+          xhr.addEventListener('abort', () => {
+            reject(new Error('Upload aborted'));
+          });
+
+          xhr.open('PUT', url);
+          xhr.setRequestHeader('Content-Type', file.type);
+          xhr.send(file);
+        });
+      };
+
+      const uploadResponse = await uploadWithProgress(signed_url, file, fileType, signal);
+
+      return {
+        blob_name,
+        filename: file.name
+      };
+    } catch (error) {
+      console.error('Upload error:', error);
+      throw error;
+    }
+  };
+
+  // Helper function to clean up blobs
+  // Save pending cleanup blobs to localStorage for retry
+  const savePendingCleanup = (blobs) => {
+    try {
+      // Get existing pending blobs
+      const existingJSON = localStorage.getItem('pendingBlobCleanup') || '[]';
+      const existing = JSON.parse(existingJSON);
+      
+      // Add new blobs, avoid duplicates
+      const combined = [...new Set([...existing, ...blobs])];
+      localStorage.setItem('pendingBlobCleanup', JSON.stringify(combined));
+      
+      return combined;
+    } catch (e) {
+      console.error('Error saving pending cleanup:', e);
+      return [];
+    }
+  };
+  
+  // Remove successfully cleaned blobs from the pending list
+  const removePendingCleanup = (blobName) => {
+    try {
+      const existingJSON = localStorage.getItem('pendingBlobCleanup') || '[]';
+      const existing = JSON.parse(existingJSON);
+      const updated = existing.filter(blob => blob !== blobName);
+      localStorage.setItem('pendingBlobCleanup', JSON.stringify(updated));
+    } catch (e) {
+      console.error('Error updating pending cleanup:', e);
+    }
+  };
+
+  const cleanupBlobs = useCallback(async (blobsToClean) => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      // Save for later retry and notify user
+      savePendingCleanup(blobsToClean);
+      toast({
+        title: "Cleanup warning",
+        description: "Upload files will be cleaned up when you sign in again.",
+        variant: "warning"
+      });
+      return;
+    }
+
+    // Process each blob with individual try/catch to handle partial failures
+    await Promise.all(blobsToClean.map(async (blobName) => {
+      try {
+        await apiClient.delete(`/tracks/cleanup-upload/${encodeURIComponent(blobName)}`, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+        // Remove from pending cleanup if successful
+        removePendingCleanup(blobName);
+      } catch (cleanupError) {
+        console.error(`Failed to clean up blob ${blobName}:`, cleanupError);
+        // Save failed cleanups for later retry
+        savePendingCleanup([blobName]);
+      }
+    }));
+  }, [apiClient, toast]);
+
+
+  // Map of file types to their corresponding form field names
+  const blobFieldMap = {
+    mp3_file: ['mp3_blob_name', 'mp3_filename'],
+    lyrics_file: ['lyrics_blob_name', 'lyrics_filename'],
+    session_file: ['session_blob_name', 'session_filename'],
+    singer_agreement_file: ['singer_agreement_blob_name', 'singer_agreement_filename'],
+    music_director_agreement_file: ['music_director_agreement_blob_name', 'music_director_agreement_filename']
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
     setLoading(true);
 
+    // Reset upload progress at the start
+    setUploadProgress({
+      mp3_file: 0,
+      lyrics_file: 0,
+      session_file: 0,
+      singer_agreement_file: 0,
+      music_director_agreement_file: 0
+    });
+
+    // Track blobs for this upload attempt (accessible to both try and catch)
+    const currentUploadBlobs = [];
+
     try {
-      const submitData = new FormData();
+      // Clean up any previous incomplete uploads before starting (use ref for sync access)
+      const existingBlobs = Object.values(uploadedBlobsRef.current).filter(Boolean);
+      if (existingBlobs.length > 0) {
+        toast.info('Cleaning up previous upload attempt...');
+        await cleanupBlobs(existingBlobs);
+      }
       
-      // Add all form fields
-      Object.keys(formData).forEach(key => {
-        if (formData[key]) {
-          submitData.append(key, formData[key]);
-        }
-      });
-      
-      // Add files if selected
+      // Reset upload tracking state synchronously to prevent race conditions
+      const resetState = {
+        mp3_file: null,
+        lyrics_file: null,
+        session_file: null,
+        singer_agreement_file: null,
+        music_director_agreement_file: null
+      };
+      setUploadedBlobs(resetState);
+      uploadedBlobsRef.current = resetState;
+
+      // Upload all files in parallel with coordinated abort
+      const uploadPromises = [];
+      const fileData = {};
+      const controller = new AbortController(); // Single controller for all uploads
+
+      // Helper to create an upload promise that handles both success and failure
+      const createUploadPromise = (file, folder, fileType) => {
+        return uploadFileToGCS(file, folder, fileType, controller.signal)
+          .then(result => {
+            // Track the blob both for cleanup and future retries
+            if (result && result.blob_name) {
+              currentUploadBlobs.push(result.blob_name);
+              setUploadedBlobs(prev => {
+                const newState = { ...prev, [fileType]: result.blob_name };
+                uploadedBlobsRef.current = newState;
+                return newState;
+              });
+            }
+            return { ...result, fileType };
+          })
+          .catch(err => {
+            // Abort other uploads when one fails
+            controller.abort();
+            // Set fileType on the error to preserve stack trace
+            err.fileType = fileType;
+            throw err;
+          });
+      };
+
       if (files.mp3_file) {
-        submitData.append('mp3_file', files.mp3_file);
-      }
-      if (files.lyrics_file) {
-        submitData.append('lyrics_file', files.lyrics_file);
-      }
-      if (files.session_file) {
-        submitData.append('session_file', files.session_file);
-      }
-      if (files.singer_agreement_file) {
-        submitData.append('singer_agreement_file', files.singer_agreement_file);
-      }
-      if (files.music_director_agreement_file) {
-        submitData.append('music_director_agreement_file', files.music_director_agreement_file);
+        uploadPromises.push(
+          createUploadPromise(files.mp3_file, 'audio', 'mp3_file')
+        );
       }
 
-      const response = await apiClient.post('/tracks', submitData, {
+      if (files.lyrics_file) {
+        uploadPromises.push(
+          createUploadPromise(files.lyrics_file, 'lyrics', 'lyrics_file')
+        );
+      }
+
+      if (files.session_file) {
+        uploadPromises.push(
+          createUploadPromise(files.session_file, 'sessions', 'session_file')
+        );
+      }
+
+      if (files.singer_agreement_file) {
+        uploadPromises.push(
+          createUploadPromise(files.singer_agreement_file, 'agreements', 'singer_agreement_file')
+        );
+      }
+
+      if (files.music_director_agreement_file) {
+        uploadPromises.push(
+          createUploadPromise(files.music_director_agreement_file, 'agreements', 'music_director_agreement_file')
+        );
+      }
+
+      // Wait for all uploads to complete and process results
+      const results = await Promise.allSettled(uploadPromises);
+      
+      // Process results
+      const failures = [];
+      results.forEach(result => {
+        if (result.status === 'fulfilled') {
+          const { fileType, blob_name, filename } = result.value;
+          fileData[fileType] = { blob_name, filename };
+        } else {
+          failures.push(result.reason);
+        }
+      });
+
+      // If there were any failures, clean up blobs from this attempt and throw error
+      if (failures.length > 0) {
+        if (currentUploadBlobs.length > 0) {
+          await cleanupBlobs(currentUploadBlobs);
+          // Reset upload tracking state and progress for failed files
+          setUploadedBlobs(prev => {
+            const newState = { ...prev };
+            failures.forEach(failure => {
+              const error = failure.reason || failure.value;
+              const fileType = error?.fileType;
+              if (fileType) {
+                newState[fileType] = null;
+              }
+            });
+            return newState;
+          });
+          setUploadProgress(prev => {
+            const newProgress = { ...prev };
+            failures.forEach(failure => {
+              const error = failure.reason || failure.value;
+              const fileType = error?.fileType;
+              if (fileType) {
+                newProgress[fileType] = 0;
+              }
+            });
+            return newProgress;
+          });
+        }
+        // Get the original error (now it's the error itself, not wrapped)
+        const firstFailure = failures[0];
+        const error = firstFailure.reason || firstFailure.value;
+        throw error;
+      }
+
+      // Create form data with metadata and blob references
+      const uploadData = new FormData();
+      
+      // Add metadata from component state
+      Object.entries(formData).forEach(([key, value]) => {
+        if (value) {
+          uploadData.append(key, value);
+        }
+      });
+
+      // Map of file types to their corresponding form field names
+
+
+      // Add blob names and filenames
+      Object.entries(fileData).forEach(([fileType, data]) => {
+        const [blobField, filenameField] = blobFieldMap[fileType];
+        if (data?.blob_name) {
+          uploadData.append(blobField, data.blob_name);
+          uploadData.append(filenameField, data.filename);
+        }
+      });
+      // Submit track metadata to backend
+      const response = await apiClient.post('/tracks', uploadData, {
         headers: {
-          'Content-Type': 'multipart/form-data'
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
         }
       });
 
       toast.success('Track uploaded successfully!');
       navigate('/');
     } catch (error) {
-      console.error('Upload error:', error);
+      console.error('Submission error:', error);
       const message = error.response?.data?.detail || 'Failed to upload track';
+
+      // Clean up any successfully uploaded blobs from this attempt
+      const blobsToClean = currentUploadBlobs.filter(Boolean);
+      
+      if (blobsToClean.length > 0) {
+        await cleanupBlobs(blobsToClean);
+      }
+
       toast.error(message);
+      throw error; // Re-throw the original error after cleanup
     } finally {
       setLoading(false);
     }
+  };
+
+  // Add this component to display upload progress
+  const ProgressBar = ({ progress, fileName }) => {
+    // Only show progress bar if a file is selected and upload has started
+    if (progress === 0 || !fileName) return null;
+    
+    return (
+      <div className="w-full mt-2">
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-sm font-medium text-gray-700">
+            {progress < 100 ? 'Uploading...' : 'Upload Complete'}
+          </span>
+          <span className="text-sm font-medium text-gray-700">{progress}%</span>
+        </div>
+        <div className="w-full bg-gray-200 rounded-full h-2">
+          <div
+            className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      </div>
+    );
   };
 
   const formatFileSize = (bytes) => {
@@ -540,6 +932,10 @@ const UploadTrack = ({ apiClient }) => {
                     )}
                   </div>
                 </Label>
+                <ProgressBar 
+                  progress={uploadProgress.mp3_file} 
+                  fileName={files.mp3_file?.name}
+                />
               </div>
             </div>
 
@@ -577,6 +973,10 @@ const UploadTrack = ({ apiClient }) => {
                     )}
                   </div>
                 </Label>
+                <ProgressBar 
+                  progress={uploadProgress.lyrics_file} 
+                  fileName={files.lyrics_file?.name}
+                />
               </div>
             </div>
 
@@ -619,6 +1019,8 @@ const UploadTrack = ({ apiClient }) => {
             </div>
           </CardContent>
         </Card>
+
+
 
         {/* Agreement Files */}
         <Card className="glass border-gray-700 slide-in">
@@ -688,6 +1090,10 @@ const UploadTrack = ({ apiClient }) => {
                     )}
                   </div>
                 </Label>
+                <ProgressBar 
+                  progress={uploadProgress.singer_agreement_file} 
+                  fileName={files.singer_agreement_file?.name}
+                />
               </div>
 
               {/* Music Director Agreement */}
@@ -745,6 +1151,10 @@ const UploadTrack = ({ apiClient }) => {
                     )}
                   </div>
                 </Label>
+                <ProgressBar 
+                  progress={uploadProgress.music_director_agreement_file} 
+                  fileName={files.music_director_agreement_file?.name}
+                />
               </div>
             </div>
           </CardContent>
