@@ -283,18 +283,52 @@ const UploadTrack = ({ apiClient }) => {
         throw new Error('Authentication token not found. Please log in again.');
       }
 
+      // Ensure content type is set, use fallback if browser doesn't detect it
+      let contentType = file.type;
+      if (!contentType || contentType === '') {
+        // Fallback based on file extension
+        const ext = file.name.toLowerCase().split('.').pop();
+        const typeMap = {
+          'mp3': 'audio/mpeg',
+          'wav': 'audio/wav',
+          'm4a': 'audio/mp4',
+          'txt': 'text/plain',
+          'pdf': 'application/pdf',
+          'doc': 'application/msword',
+          'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          'zip': 'application/zip',
+          'rar': 'application/x-rar-compressed',
+          'jpg': 'image/jpeg',
+          'jpeg': 'image/jpeg',
+          'png': 'image/png',
+          'webp': 'image/webp',
+          'gif': 'image/gif'
+        };
+        contentType = typeMap[ext] || 'application/octet-stream';
+      }
+
+      console.log(`Uploading ${file.name} (${contentType}) to ${folder}`);
+
       const formData = new FormData();
       formData.append('filename', file.name);
-      formData.append('content_type', file.type);
+      formData.append('content_type', contentType);
       formData.append('folder', folder);
 
-      const urlResponse = await apiClient.post('/tracks/generate-upload-url', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-          'Authorization': `Bearer ${token}`
-        },
-        signal // Pass signal to apiClient for URL generation
-      });
+      let urlResponse;
+      try {
+        urlResponse = await apiClient.post('/tracks/generate-upload-url', formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data',
+            'Authorization': `Bearer ${token}`
+          },
+          signal // Pass signal to apiClient for URL generation
+        });
+      } catch (urlError) {
+        // Better error message for signed URL generation failure
+        const errorMsg = urlError.response?.data?.detail || urlError.message || 'Failed to generate upload URL';
+        console.error('Failed to get signed URL:', errorMsg, 'for file:', file.name, 'type:', contentType);
+        throw new Error(`Upload preparation failed: ${errorMsg}`);
+      }
 
       const { signed_url, blob_name } = urlResponse.data;
 
