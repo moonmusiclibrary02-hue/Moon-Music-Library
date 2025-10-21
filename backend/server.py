@@ -13,6 +13,8 @@ from jose import JWTError, jwt
 from datetime import datetime, timedelta, timezone
 import os
 import logging
+import string
+import time
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -927,7 +929,7 @@ class RateLimiter:
 # Initialize rate limiter (15 requests per minute per user)
 upload_rate_limiter = RateLimiter(max_requests=15, time_window=60)
 
-def require_upload_permission(folder: str, current_user: User):
+async def require_upload_permission(folder: str, current_user: User):
     """Validate user's permission to upload to specific folder"""
     if current_user.user_type == "admin":
         return  # Admins have full access
@@ -941,7 +943,7 @@ def require_upload_permission(folder: str, current_user: User):
     # For managers, ensure they're only uploading to their assigned language folders
     # This assumes folders are language-specific, adjust logic if needed
     if folder == "audio" and current_user.manager_id:
-        manager = db.managers.find_one({"id": current_user.manager_id})
+        manager = await db.managers.find_one({"id": current_user.manager_id})
         if not manager or not manager.get("is_active"):
             raise HTTPException(
                 status_code=403,
@@ -1736,7 +1738,7 @@ async def generate_upload_url(
         raise HTTPException(status_code=400, detail=f"Invalid folder. Must be one of: {valid_folders}")
 
     # Check user's permission for the requested folder
-    require_upload_permission(folder, current_user)
+    await require_upload_permission(folder, current_user)
 
     # Define allowed MIME types per folder
     allowed_content_types = {
@@ -1832,7 +1834,7 @@ async def cleanup_upload(
         )
 
     # Check user's permission for the folder
-    require_upload_permission(folder, current_user)
+    await require_upload_permission(folder, current_user)
 
     try:
         # Attempt to delete the blob

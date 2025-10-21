@@ -272,7 +272,7 @@ const UploadTrack = ({ apiClient }) => {
 
   const handleSubmit = async (event) => {
     event.preventDefault();
-    setIsSubmitting(true);
+    setLoading(true);
 
     // Reset upload progress at the start
     setUploadProgress({
@@ -444,7 +444,7 @@ const UploadTrack = ({ apiClient }) => {
       const message = error.response?.data?.detail || 'Failed to upload track';
 
       // Clean up any successfully uploaded blobs
-      if (uploadedBlobs.length > 0) {
+      if (uploadedBlobs && Object.keys(uploadedBlobs).length > 0) {
         const token = localStorage.getItem('token');
         if (!token) {
           console.error('Authentication token not found during cleanup');
@@ -452,16 +452,16 @@ const UploadTrack = ({ apiClient }) => {
         }
 
         // Call backend to delete the uploaded blobs
-        await Promise.all(uploadedBlobs.map(async (blobName) => {
+        await Promise.all(Object.values(uploadedBlobs).filter(Boolean).map(async (blob) => {
           try {
-            await apiClient.delete(`/tracks/cleanup-upload/${encodeURIComponent(blobName)}`, {
+            await apiClient.delete(`/tracks/cleanup-upload/${encodeURIComponent(blob.blob_name)}`, {
               headers: {
                 'Authorization': `Bearer ${token}`
               }
             });
           } catch (cleanupError) {
             // Log cleanup errors but don't block error handling
-            console.error(`Failed to clean up blob ${blobName}:`, cleanupError);
+            console.error(`Failed to clean up blob ${blob.blob_name}:`, cleanupError);
           }
         }));
       }
@@ -960,15 +960,7 @@ const UploadTrack = ({ apiClient }) => {
           </CardContent>
         </Card>
 
-        </Label>
-                <ProgressBar 
-                  progress={uploadProgress.session_file} 
-                  fileName={files.session_file?.name}
-                />
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+
 
         {/* Agreement Files */}
         <Card className="glass border-gray-700 slide-in">
