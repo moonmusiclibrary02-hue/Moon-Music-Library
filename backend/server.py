@@ -925,7 +925,7 @@ class RateLimiter:
         self.requests = {}
         self.lock = threading.Lock()
     
-    def _cleanup_old_requests(self, now: float, user_id: str = None) -> None:
+    def _cleanup_old_requests(self, now: float, user_id: Optional[str] = None) -> None:
         """Remove expired requests for given user or all users if dict too large"""
         if user_id is not None:
             # Clean specific user's requests

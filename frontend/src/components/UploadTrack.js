@@ -346,6 +346,9 @@ const UploadTrack = ({ apiClient }) => {
       music_director_agreement_file: 0
     });
 
+    // Track blobs for this upload attempt (accessible to both try and catch)
+    const currentUploadBlobs = [];
+
     try {
       // Clean up any previous incomplete uploads before starting
       const existingBlobs = Object.values(uploadedBlobs).filter(Boolean);
@@ -366,7 +369,6 @@ const UploadTrack = ({ apiClient }) => {
       // Upload all files in parallel with coordinated abort
       const uploadPromises = [];
       const fileData = {};
-      const currentUploadBlobs = []; // Track blobs for this upload attempt
       const controller = new AbortController(); // Single controller for all uploads
 
       // Helper to create an upload promise that handles both success and failure
@@ -499,10 +501,10 @@ const UploadTrack = ({ apiClient }) => {
       console.error('Submission error:', error);
       const message = error.response?.data?.detail || 'Failed to upload track';
 
-      // Clean up any successfully uploaded blobs
-      if (uploadedBlobs && Object.keys(uploadedBlobs).length > 0) {
-        const blobsToClean = Object.values(uploadedBlobs).filter(Boolean);
-        
+      // Clean up any successfully uploaded blobs from this attempt
+      const blobsToClean = currentUploadBlobs.filter(Boolean);
+      
+      if (blobsToClean.length > 0) {
         // Save all blobs for potential later cleanup using helper
         savePendingCleanup(blobsToClean);
         
