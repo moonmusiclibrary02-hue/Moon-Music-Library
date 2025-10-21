@@ -5,7 +5,7 @@ from fastapi.responses import FileResponse, Response, RedirectResponse, Streamin
 from io import BytesIO
 from dotenv import load_dotenv
 import tempfile
-from google.cloud.exceptions import NotFound
+from google.cloud.exceptions import NotFound, PermissionDenied
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import hashlib
@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import os
 import logging
 import string
+import threading
 import time
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -990,11 +991,12 @@ async def require_upload_permission(folder: str, current_user: User):
             )
         
         # Folder-specific access control can be added here if needed
-        if folder == "audio":
-            raise HTTPException(
-                status_code=403,
-                detail="Manager account is inactive"
-            )
+        # Example: Restrict manager access to specific folders if required
+        # if folder == "audio" and not manager.get("has_audio_access", False):
+        #     raise HTTPException(
+        #         status_code=403,
+        #         detail="Access to audio folder is not permitted for this manager"
+        #     )
 
 def sanitize_filename(filename: str) -> str:
     """Sanitize filename for safe storage"""
@@ -1777,7 +1779,7 @@ async def generate_upload_url(
 ):
     """Generate a signed URL for direct-to-GCS file upload"""
     # Check rate limit
-    if not await upload_rate_limiter.is_allowed(current_user.id):
+    if not upload_rate_limiter.is_allowed(current_user.id):
         raise HTTPException(
             status_code=429,
             detail="Upload rate limit exceeded. Please try again later."

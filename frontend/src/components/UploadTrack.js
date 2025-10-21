@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useToast } from '../hooks/use-toast';
 import { Button } from './ui/button';
@@ -52,6 +52,28 @@ const UploadTrack = ({ apiClient }) => {
     singer_agreement_file: 0,
     music_director_agreement_file: 0
   });
+  
+  // Check for pending cleanups on component mount
+  useEffect(() => {
+    const retryPendingCleanups = async () => {
+      try {
+        const pendingJSON = localStorage.getItem('pendingBlobCleanup');
+        if (!pendingJSON) return;
+        
+        const pending = JSON.parse(pendingJSON);
+        if (pending.length > 0) {
+          console.log(`Retrying cleanup for ${pending.length} blobs`);
+          await cleanupBlobs(pending);
+        }
+      } catch (e) {
+        console.error('Error retrying pending cleanups:', e);
+      }
+    };
+    
+    // Wait a moment for auth to be ready
+    const timer = setTimeout(() => retryPendingCleanups(), 2000);
+    return () => clearTimeout(timer);
+  }, []);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -241,13 +263,64 @@ const UploadTrack = ({ apiClient }) => {
   };
 
   // Helper function to clean up blobs
+  // Save pending cleanup blobs to localStorage for retry
+  const savePendingCleanup = (blobs) => {
+    try {
+      // Get existing pending blobs
+      const existingJSON = localStorage.getItem('pendingBlobCleanup') || '[]';
+      const existing = JSON.parse(existingJSON);
+      
+      // Add new blobs, avoid duplicates
+      const combined = [...new Set([...existing, ...blobs])];
+      localStorage.setItem('pendingBlobCleanup', JSON.stringify(combined));
+      
+      return combined;
+    } catch (e) {
+      console.error('Error saving pending cleanup:', e);
+      return [];
+    }
+  };
+  
+  // Remove successfully cleaned blobs from the pending list
+  const removePendingCleanup = (blobName) => {
+    try {
+      const existingJSON = localStorage.getItem('pendingBlobCleanup') || '[]';
+      const existing = JSON.parse(existingJSON);
+      const updated = existing.filter(blob => blob !== blobName);
+      localStorage.setItem('pendingBlobCleanup', JSON.stringify(updated));
+    } catch (e) {
+      console.error('Error updating pending cleanup:', e);
+    }
+  };
+
+  // Attempt unauthed cleanup via backend service account
+  const tryServiceCleanup = async (blobs) => {
+    try {
+      await apiClient.post('/tracks/cleanup-unauthed', { blobs });
+      return true;
+    } catch (e) {
+      console.error('Service cleanup failed:', e);
+      return false;
+    }
+  };
+
   const cleanupBlobs = async (blobsToClean) => {
     const token = localStorage.getItem('token');
     if (!token) {
-      console.error('Authentication token not found during cleanup');
+      // Save for later retry and notify user
+      savePendingCleanup(blobsToClean);
+      toast({
+        title: "Cleanup warning",
+        description: "Upload files will be cleaned up when you sign in again.",
+        variant: "warning"
+      });
+      
+      // Try server-side cleanup as fallback
+      await tryServiceCleanup(blobsToClean);
       return;
     }
 
+    // Process each blob with individual try/catch to handle partial failures
     await Promise.all(blobsToClean.map(async (blobName) => {
       try {
         await apiClient.delete(`/tracks/cleanup-upload/${encodeURIComponent(blobName)}`, {
@@ -255,8 +328,12 @@ const UploadTrack = ({ apiClient }) => {
             'Authorization': `Bearer ${token}`
           }
         });
+        // Remove from pending cleanup if successful
+        removePendingCleanup(blobName);
       } catch (cleanupError) {
         console.error(`Failed to clean up blob ${blobName}:`, cleanupError);
+        // Save failed cleanups for later retry
+        savePendingCleanup([blobName]);
       }
     }));
   };
