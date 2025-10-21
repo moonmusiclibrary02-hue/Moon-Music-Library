@@ -5,7 +5,7 @@ from fastapi.responses import FileResponse, Response, RedirectResponse, Streamin
 from io import BytesIO
 from dotenv import load_dotenv
 import tempfile
-from google.cloud.exceptions import NotFound, PermissionDenied
+from google.cloud.exceptions import NotFound, Forbidden
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import hashlib
@@ -1905,7 +1905,7 @@ async def cleanup_upload(
             detail="File not found"
         ) from None
         
-    except PermissionDenied:
+    except Forbidden:
         # Permission issues with GCS
         raise HTTPException(
             status_code=403,
