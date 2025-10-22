@@ -1644,8 +1644,12 @@ async def create_track(
         managed_by=managed_by
     )
     
+    logger.info(f"Track created with blob names: mp3={track.mp3_blob_name}, lyrics={track.lyrics_blob_name}")
+    
     track_dict = prepare_for_mongo(track.dict())
     await db.tracks.insert_one(track_dict)
+    
+    logger.info(f"Track saved to database with ID: {track.id}")
     
     return track
 
@@ -1753,13 +1757,17 @@ async def download_track_file(track_id: str, file_type: str, current_user: User 
     """
     Generates a temporary signed URL for downloading a specific file and redirects to it.
     """
+    logger.info(f"Download request for track {track_id}, file_type={file_type} from user {current_user.id}")
+    
     track = await db.tracks.find_one({"id": track_id})
     if not track:
+        logger.error(f"Track {track_id} not found")
         raise HTTPException(status_code=404, detail="Track not found")
 
     # Authorization check
     if current_user.user_type == "manager":
         if track.get("created_by") != current_user.id and track.get("managed_by") != current_user.manager_id:
+            logger.error(f"User {current_user.id} not authorized to download from track {track_id}")
             raise HTTPException(status_code=403, detail="Not authorized to download this file")
 
     # Map the file type from the URL to the correct blob name field in the database
@@ -1773,9 +1781,11 @@ async def download_track_file(track_id: str, file_type: str, current_user: User 
     
     blob_field = blob_field_map.get(file_type)
     if not blob_field or not track.get(blob_field):
+        logger.error(f"File type '{file_type}' not found for track {track_id}. blob_field={blob_field}, value={track.get(blob_field)}")
         raise HTTPException(status_code=404, detail=f"File of type '{file_type}' not found for this track.")
 
     blob_name = track[blob_field]
+    logger.info(f"Downloading blob: {blob_name}")
     
     # Generate a signed URL for reading (GET) the file
     try:
@@ -1785,12 +1795,14 @@ async def download_track_file(track_id: str, file_type: str, current_user: User 
         # Generate a URL that forces download by setting response-disposition
         original_filename = track.get(f"{file_type}_filename") or blob_name.split('/')[-1]
         
+        logger.info(f"Generating signed download URL for {blob_name} as {original_filename}")
         url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(minutes=15),
             method="GET",
             response_disposition=f'attachment; filename="{original_filename}"'
         )
+        logger.info(f"Generated signed download URL successfully")
         # Redirect the user's browser directly to the GCS download link
         return RedirectResponse(url=url)
     except Exception as e:
@@ -1803,28 +1815,38 @@ async def stream_track_audio(track_id: str, current_user: User = Depends(get_cur
     """
     Generates a temporary signed URL for streaming the audio file and redirects to it.
     """
+    logger.info(f"Stream request for track {track_id} from user {current_user.id}")
+    
     track = await db.tracks.find_one({"id": track_id})
     if not track:
+        logger.error(f"Track {track_id} not found")
         raise HTTPException(status_code=404, detail="Track not found")
 
     # Authorization check
     if current_user.user_type == "manager":
         if track.get("created_by") != current_user.id and track.get("managed_by") != current_user.manager_id:
+            logger.error(f"User {current_user.id} not authorized to stream track {track_id}")
             raise HTTPException(status_code=403, detail="Not authorized to stream this file")
 
     blob_name = track.get("mp3_blob_name")
+    logger.info(f"Track {track_id} mp3_blob_name: {blob_name}")
+    
     if not blob_name:
+        logger.error(f"No mp3_blob_name found for track {track_id}")
         raise HTTPException(status_code=404, detail="Audio file not found for this track.")
     
     # Generate a signed URL for reading (GET) the file
     try:
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(blob_name)
+        
+        logger.info(f"Generating signed URL for blob: {blob_name}")
         url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(hours=2), # Longer expiration for audio streaming
             method="GET"
         )
+        logger.info(f"Generated signed URL successfully for {blob_name}")
         # Redirect the user's browser directly to the GCS stream link
         return RedirectResponse(url=url)
     except Exception as e:
