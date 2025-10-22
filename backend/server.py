@@ -1558,34 +1558,45 @@ async def create_track(
     
     serial_number = f"{prefix}{next_number:04d}"  # Format as OC0001, MR0001, etc.
     
-    # Validate file sizes (500MB limit) - only for direct file uploads
-    max_size = 500 * 1024 * 1024  # 500MB in bytes
+    # Log what we received
+    logger.info(f"Creating track '{title}' for user {current_user.id}")
+    logger.info(f"Received blob names: mp3={mp3_blob_name}, lyrics={lyrics_blob_name}, session={session_blob_name}")
+    logger.info(f"Received files: mp3={mp3_file is not None}, lyrics={lyrics_file is not None}, session={session_file is not None}")
     
     # Handle file uploads (legacy) OR use provided blob names (new GCS workflow)
-    # If blob names are provided, use them directly (frontend already uploaded to GCS)
-    # Otherwise, upload files directly to GCS (backward compatibility)
+    # Priority: If files are uploaded directly, use them (legacy)
+    # Otherwise, use blob names provided from frontend (new workflow)
     
-    # Upload files if provided, otherwise use blob names from frontend
+    # MP3 Audio
     if mp3_file:
+        # Legacy: Upload file directly
         mp3_blob_name = await upload_to_gcs(mp3_file, "audio")
         mp3_filename = mp3_file.filename
-    # If no file but blob name provided, we're using the new workflow
+    # else: use mp3_blob_name and mp3_filename from Form parameters (already set)
     
+    # Lyrics
     if lyrics_file:
         lyrics_blob_name = await upload_to_gcs(lyrics_file, "lyrics")
         lyrics_filename = lyrics_file.filename
+    # else: use lyrics_blob_name and lyrics_filename from Form parameters
         
+    # Session
     if session_file:
         session_blob_name = await upload_to_gcs(session_file, "sessions")
         session_filename = session_file.filename
+    # else: use session_blob_name and session_filename from Form parameters
         
+    # Singer Agreement
     if singer_agreement_file:
         singer_agreement_blob_name = await upload_to_gcs(singer_agreement_file, "agreements")
         singer_agreement_filename = singer_agreement_file.filename
+    # else: use singer_agreement_blob_name and singer_agreement_filename from Form parameters
         
+    # Music Director Agreement
     if music_director_agreement_file:
         music_director_agreement_blob_name = await upload_to_gcs(music_director_agreement_file, "agreements")
         music_director_agreement_filename = music_director_agreement_file.filename
+    # else: use music_director_agreement_blob_name and music_director_agreement_filename from Form parameters
     
     # For managers, validate that they're uploading in their assigned language
     if current_user.user_type == "manager" and current_user.manager_id:
