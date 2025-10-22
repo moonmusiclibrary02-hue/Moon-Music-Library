@@ -324,10 +324,16 @@ const UploadTrack = ({ apiClient }) => {
           signal // Pass signal to apiClient for URL generation
         });
       } catch (urlError) {
+        // --- START OF MODIFICATION ---
         // Better error message for signed URL generation failure
         const errorMsg = urlError.response?.data?.detail || urlError.message || 'Failed to generate upload URL';
         console.error('Failed to get signed URL:', errorMsg, 'for file:', file.name, 'type:', contentType);
-        throw new Error(`Upload preparation failed: ${errorMsg}`);
+        
+        // Re-throw the original 'urlError' from apiClient.
+        // This preserves the full error object, including the '.response' property,
+        // which the handleSubmit function's catch block can then properly read.
+        throw urlError;
+        // --- END OF MODIFICATION ---
       }
 
       const { signed_url, blob_name } = urlResponse.data;
