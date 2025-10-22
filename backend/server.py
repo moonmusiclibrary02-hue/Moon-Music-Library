@@ -630,6 +630,54 @@ def generate_excel_template():
 
 import asyncio
 
+async def generate_signed_url_with_impersonation(blob_name: str, expiration: timedelta, method: str = "GET", response_disposition: str = None) -> str:
+    """
+    Generate a signed URL using explicit impersonation credentials.
+    This fixes the 'you need a private key to sign credentials' error.
+    """
+    if not GCS_BUCKET_NAME:
+        raise HTTPException(status_code=500, detail="GCS bucket name is not configured.")
+    
+    if not SIGNING_SERVICE_ACCOUNT_EMAIL:
+        raise HTTPException(status_code=500, detail="Signing service account is not configured.")
+    
+    try:
+        # Step 1: Get base credentials from the environment
+        base_creds, project_id = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        logger.info(f"Base credentials obtained for project: {project_id}")
+        
+        # Step 2: Create impersonated credentials
+        impersonated_creds = impersonated_credentials.Credentials(
+            source_credentials=base_creds,
+            target_principal=SIGNING_SERVICE_ACCOUNT_EMAIL,
+            target_scopes=["https://www.googleapis.com/auth/devstorage.read_write"],
+            lifetime=int(expiration.total_seconds())
+        )
+        logger.info(f"Impersonated credentials created for: {SIGNING_SERVICE_ACCOUNT_EMAIL}")
+        
+        # Step 3: Generate signed URL with impersonated credentials
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_name)
+        
+        kwargs = {
+            "version": "v4",
+            "expiration": expiration,
+            "method": method,
+            "credentials": impersonated_creds
+        }
+        
+        if response_disposition:
+            kwargs["response_disposition"] = response_disposition
+        
+        signed_url = await asyncio.to_thread(blob.generate_signed_url, **kwargs)
+        logger.info(f"Successfully generated signed URL for blob: {blob_name}")
+        
+        return signed_url
+        
+    except Exception as e:
+        logger.exception(f"Failed to generate signed URL for blob: {blob_name}")
+        raise HTTPException(status_code=500, detail=f"Could not generate signed URL: {str(e)}")
+
 async def upload_to_gcs(file: UploadFile, folder: str) -> str:
     """
     Uploads a file to a specified folder in the GCS bucket and returns its blob name.
@@ -1787,27 +1835,19 @@ async def download_track_file(track_id: str, file_type: str, current_user: User 
     blob_name = track[blob_field]
     logger.info(f"Downloading blob: {blob_name}")
     
-    # Generate a signed URL for reading (GET) the file
-    try:
-        bucket = storage_client.bucket(GCS_BUCKET_NAME)
-        blob = bucket.blob(blob_name)
-        
-        # Generate a URL that forces download by setting response-disposition
-        original_filename = track.get(f"{file_type}_filename") or blob_name.split('/')[-1]
-        
-        logger.info(f"Generating signed download URL for {blob_name} as {original_filename}")
-        url = blob.generate_signed_url(
-            version="v4",
-            expiration=timedelta(minutes=15),
-            method="GET",
-            response_disposition=f'attachment; filename="{original_filename}"'
-        )
-        logger.info(f"Generated signed download URL successfully")
-        # Redirect the user's browser directly to the GCS download link
-        return RedirectResponse(url=url)
-    except Exception as e:
-        logger.exception(f"Failed to generate download URL for blob: {blob_name}")
-        raise HTTPException(status_code=500, detail="Could not generate download link.")
+    # Generate a URL that forces download by setting response-disposition
+    original_filename = track.get(f"{file_type}_filename") or blob_name.split('/')[-1]
+    
+    logger.info(f"Generating signed download URL for {blob_name} as {original_filename}")
+    url = await generate_signed_url_with_impersonation(
+        blob_name=blob_name,
+        expiration=timedelta(minutes=15),
+        method="GET",
+        response_disposition=f'attachment; filename="{original_filename}"'
+    )
+    logger.info(f"Generated signed download URL successfully")
+    # Redirect the user's browser directly to the GCS download link
+    return RedirectResponse(url=url)
 
 
 @api_router.get("/tracks/{track_id}/stream")
@@ -1835,23 +1875,16 @@ async def stream_track_audio(track_id: str, current_user: User = Depends(get_cur
         logger.error(f"No mp3_blob_name found for track {track_id}")
         raise HTTPException(status_code=404, detail="Audio file not found for this track.")
     
-    # Generate a signed URL for reading (GET) the file
-    try:
-        bucket = storage_client.bucket(GCS_BUCKET_NAME)
-        blob = bucket.blob(blob_name)
-        
-        logger.info(f"Generating signed URL for blob: {blob_name}")
-        url = blob.generate_signed_url(
-            version="v4",
-            expiration=timedelta(hours=2), # Longer expiration for audio streaming
-            method="GET"
-        )
-        logger.info(f"Generated signed URL successfully for {blob_name}")
-        # Redirect the user's browser directly to the GCS stream link
-        return RedirectResponse(url=url)
-    except Exception as e:
-        logger.exception(f"Failed to generate stream URL for blob: {blob_name}")
-        raise HTTPException(status_code=500, detail="Could not generate audio stream link.")        
+    # Generate a signed URL for reading (GET) the file using impersonation
+    logger.info(f"Generating signed URL for blob: {blob_name}")
+    url = await generate_signed_url_with_impersonation(
+        blob_name=blob_name,
+        expiration=timedelta(hours=2),  # Longer expiration for audio streaming
+        method="GET"
+    )
+    logger.info(f"Generated signed URL successfully for {blob_name}")
+    # Redirect the user's browser directly to the GCS stream link
+    return RedirectResponse(url=url)        
 
 @api_router.get("/tracks/next-code/{full_prefix}")
 async def get_next_unique_code(full_prefix: str, current_user: User = Depends(get_current_user)):
