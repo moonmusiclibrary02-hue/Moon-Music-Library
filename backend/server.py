@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
 # --- Google Cloud Storage (GCS) Connection ---
 # This environment variable will be injected from Secret Manager by our CI/CD pipeline.
 GCS_BUCKET_NAME = os.environ.get('GCS_BUCKET_NAME')
+SIGNING_SERVICE_ACCOUNT_EMAIL = os.environ.get('SIGNING_SERVICE_ACCOUNT_EMAIL') # Add this line
 
 # Validate GCS configuration before creating client
 if not GCS_BUCKET_NAME:
@@ -1862,15 +1863,26 @@ async def generate_upload_url(
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(blob_name)
 
-        # Generate v4 signed URL for upload, valid for 15 minutes
-        logger.info(f"Generating signed URL for blob: {blob_name}")
+        # --- START OF MODIFICATION ---
+        # The environment variable for the service account email is now required.
+        # This is crucial for signing URLs in a token-based credential environment like Cloud Run.
+        if not SIGNING_SERVICE_ACCOUNT_EMAIL:
+            logger.critical("FATAL: SIGNING_SERVICE_ACCOUNT_EMAIL environment variable is not set. Cannot generate signed URLs.")
+            raise HTTPException(status_code=500, detail="Server is misconfigured for generating upload URLs.")
+
+        logger.info(f"Generating signed URL for blob: {blob_name} using service account: {SIGNING_SERVICE_ACCOUNT_EMAIL}")
+        
+        # Generate v4 signed URL for upload, valid for 15 minutes.
+        # The 'service_account_email' parameter delegates the signing operation.
         signed_url = await asyncio.to_thread(
             blob.generate_signed_url,
             expiration=timedelta(minutes=15),
             method="PUT",
             version="v4",
             content_type=content_type,
+            service_account_email=SIGNING_SERVICE_ACCOUNT_EMAIL, # This is the critical line that fixes the error
         )
+        # --- END OF MODIFICATION ---
 
         # Log upload URL generation for audit
         logger.info(f"Successfully generated upload URL for user {current_user.id} - folder: {folder}, file: {safe_filename}")
