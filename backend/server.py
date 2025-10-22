@@ -1783,6 +1783,25 @@ async def verify_deployment():
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
+
+@api_router.get("/verify-libraries")
+async def verify_libraries():
+    """Endpoint to verify the installed versions of key libraries."""
+    try:
+        import google.cloud.storage
+        import google.auth
+        
+        gcs_version = getattr(google.cloud.storage, "__version__", "Not Found")
+        auth_version = getattr(google.auth, "__version__", "Not Found")
+        
+        return {
+            "message": "Installed library versions",
+            "google_cloud_storage_version": gcs_version,
+            "google_auth_version": auth_version
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 @api_router.post("/tracks/generate-upload-url")
 async def generate_upload_url(
     filename: str = Form(...),
