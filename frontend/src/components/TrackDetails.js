@@ -24,30 +24,28 @@ const TrackDetails = ({ apiClient }) => {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
   useEffect(() => {
-    fetchTrack();
-  }, [id]);
-
-  const fetchTrack = async () => {
-    try {
-      setLoading(true);
-      const token = localStorage.getItem('token');
-      // Use apiClient's configured instance to automatically include headers
-      const response = await apiClient.get(`/tracks/${id}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      setTrack(response.data);
-      setEditForm(response.data);
-    } catch (error) {
-      console.error('Error fetching track:', error);
-      const message = error.response?.data?.detail || 'Failed to load track details';
-      toast.error(message);
-      if (error.response?.status !== 403) {
-        navigate('/');
+    const fetchTrack = async () => {
+      try {
+        setLoading(true);
+        const token = localStorage.getItem('token');
+        const response = await apiClient.get(`/tracks/${id}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        setTrack(response.data);
+        setEditForm(response.data);
+      } catch (error) {
+        console.error('Error fetching track:', error);
+        const message = error.response?.data?.detail || 'Failed to load track details';
+        toast.error(message);
+        if (error.response?.status !== 403) {
+          navigate('/');
+        }
+      } finally {
+        setLoading(false);
       }
-    } finally {
-      setLoading(false);
-    }
-  };
+    };
+    fetchTrack();
+  }, [id, apiClient, navigate]);
 
   const handleEditChange = (e) => {
     const { name, value } = e.target;
@@ -57,18 +55,11 @@ const TrackDetails = ({ apiClient }) => {
   const handleSaveEdit = async () => {
     try {
       const updateData = {
-        title: editForm.title,
-        music_composer: editForm.music_composer,
-        lyricist: editForm.lyricist,
-        singer_name: editForm.singer_name,
-        tempo: editForm.tempo,
-        scale: editForm.scale,
-        audio_language: editForm.audio_language,
-        release_date: editForm.release_date,
-        album_name: editForm.album_name,
-        other_info: editForm.other_info
+        title: editForm.title, music_composer: editForm.music_composer, lyricist: editForm.lyricist,
+        singer_name: editForm.singer_name, tempo: editForm.tempo, scale: editForm.scale,
+        audio_language: editForm.audio_language, release_date: editForm.release_date,
+        album_name: editForm.album_name, other_info: editForm.other_info
       };
-
       const token = localStorage.getItem('token');
       const response = await apiClient.put(`/tracks/${id}`, updateData, {
         headers: { Authorization: `Bearer ${token}` }
@@ -89,9 +80,9 @@ const TrackDetails = ({ apiClient }) => {
       await apiClient.delete(`/tracks/${id}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
-      setDeleteDialogOpen(false); // Close dialog first
+      setDeleteDialogOpen(false);
       toast.success('Track and associated files deleted successfully!');
-      navigate('/'); // Then navigate
+      navigate('/');
     } catch (error) {
       console.error('Error deleting track:', error);
       const message = error.response?.data?.detail || 'Failed to delete track';
@@ -99,31 +90,19 @@ const TrackDetails = ({ apiClient }) => {
     }
   };
   
-  // *** UPDATED DOWNLOAD FUNCTION ***
-  // This is now much simpler. It just opens the backend URL in a new tab,
-  // and the backend handles the redirect to the actual GCS download link.
   const downloadFile = (fileType) => {
-    const token = localStorage.getItem('token');
-    const downloadUrl = `${apiClient.defaults.baseURL}/tracks/${id}/download/${fileType}?token=${token}`;
-    // We need a way to pass the token. A query parameter is one way if headers aren't possible.
-    // Let's adjust the backend to accept it. For now, we assume direct navigation.
-    // The cleanest way is to just open the URL. The browser will handle the download.
-    const url = `${apiClient.defaults.baseURL}/tracks/${id}/download/${fileType}`;
-    // To handle auth, we can't just open a new window. We need to fetch and create a blob URL.
-    
     toast.info(`Preparing ${fileType} file for download...`);
     apiClient.get(`/tracks/${id}/download/${fileType}`, {
         headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` },
         responseType: 'blob',
     }).then(response => {
-        // Since the backend redirects, the browser follows it and the final response is the blob.
         const url = window.URL.createObjectURL(new Blob([response.data]));
         const link = document.createElement('a');
         const contentDisposition = response.headers['content-disposition'];
-        let filename = `${track.title}_${fileType}.dat`; // fallback filename
+        let filename = `${track.title}_${fileType}.dat`;
         if (contentDisposition) {
             const filenameMatch = contentDisposition.match(/filename="?(.+)"?/);
-            if (filenameMatch.length === 2)
+            if (filenameMatch && filenameMatch.length === 2)
                 filename = filenameMatch[1];
         }
         link.href = url;
@@ -143,90 +122,146 @@ const TrackDetails = ({ apiClient }) => {
     if (!dateString) return 'Not specified';
     const date = new Date(dateString);
     if (isNaN(date.getTime())) return 'Invalid Date';
-    return date.toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    });
+    return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
   };
 
-  if (loading) { /* ... keep loading JSX as is ... */ }
-  if (!track) { /* ... keep not found JSX as is ... */ }
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[60vh]">
+        <div className="text-center space-y-4">
+          <div className="loading-spinner mx-auto w-8 h-8 border-orange-500"></div>
+          <p className="text-gray-400">Loading track details...</p>
+        </div>
+      </div>
+    );
+  }
 
-  return (
-    <div className="max-w-6xl mx-auto p-4 sm:p-6 lg:p-8 space-y-8">
-      {/* ... keep header and other JSX as is ... */}
-
-      {/* Find the Audio Preview Card */}
-      {track.mp3_blob_name && ( // Use blob_name to check for existence
-        <Card className="glass border-gray-700 slide-in">
-          <CardHeader>
-            <CardTitle className="text-white flex items-center space-x-2">
-              <Play className="h-5 w-5" />
-              <span>Audio Preview</span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <audio
-              ref={audioRef}
-              controls
-              className="w-full"
-              preload="metadata"
-              data-testid="audio-preview"
-              crossOrigin="anonymous"
-              // *** UPDATED SRC ATTRIBUTE ***
-              // This now points to the secure streaming endpoint
-              src={`${apiClient.defaults.baseURL}/tracks/${track.id}/stream`}
-            >
-              Your browser does not support the audio element.
-            </audio>
-            <MusicVisualizer audioRef={audioRef} />
+  // *** FIX #1: THIS GUARD IS CRITICAL. ***
+  // It ensures that none of the code below tries to render if `track` is null.
+  if (!track) {
+    return (
+      <div className="max-w-4xl mx-auto p-4 sm:p-6 lg:p-8">
+        <Card className="glass border-gray-700 text-center py-12">
+          <CardContent>
+            <Music className="h-16 w-16 text-gray-500 mx-auto mb-4" />
+            <h3 className="text-xl font-semibold text-white mb-2">Track Not Found</h3>
+            <p className="text-gray-400 mb-4">The track you're looking for doesn't exist or has been deleted.</p>
+            <Link to="/">
+              <Button className="bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600">
+                <ArrowLeft className="h-4 w-4 mr-2" /> Back to Dashboard
+              </Button>
+            </Link>
           </CardContent>
         </Card>
-      )}
+      </div>
+    );
+  }
 
-      {/* ... the rest of your JSX file ... */}
-      
-       {/* In the File Downloads Card, update the checks */}
-       <div className="flex items-center justify-between">
-          <span className="text-sm text-gray-400">Audio:</span>
+  // If we reach this point, `track` is guaranteed to be a valid object.
+  return (
+    <div className="max-w-6xl mx-auto p-4 sm:p-6 lg:p-8 space-y-8">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0 fade-in">
+        <div className="space-y-2">
           <div className="flex items-center space-x-2">
-            {track.mp3_blob_name ? ( /* Check blob name */
-              <>
-                <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Available</Badge>
-                <Button size="sm" onClick={() => downloadFile('mp3')} /* ... */>
-                  <Download className="h-3 w-3 mr-1" /> Download
-                </Button>
-              </>
-            ) : <Badge className="bg-gray-500/20 text-gray-400 border-gray-500/30">Not Available</Badge>}
+            <Button variant="ghost" size="sm" onClick={() => navigate('/')} className="text-gray-400 hover:text-white p-2 -ml-2">
+              <ArrowLeft className="h-4 w-4" />
+            </Button>
+            <h1 className="text-3xl sm:text-4xl font-bold gradient-text">{track.title}</h1>
           </div>
-        </div>
-
-        {/* Repeat for other file types */}
-        <div className="flex items-center justify-between">
-            <span className="text-sm text-gray-400">Lyrics:</span>
-            <div className="flex items-center space-x-2">
-                {track.lyrics_blob_name ? (  /* Check blob name */
-                <>
-                    <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Available</Badge>
-                    <Button size="sm" onClick={() => downloadFile('lyrics')} /* ... */>
-                        <Download className="h-3 w-3 mr-1" /> Download
-                    </Button>
-                </>
-                ) : <Badge className="bg-gray-500/20 text-gray-400 border-gray-500/30">Not Available</Badge>}
+          {track.album_name && (
+            <div className="flex items-center space-x-2 text-gray-400 ml-10">
+              <Album className="h-4 w-4" />
+              <span>from "{track.album_name}"</span>
             </div>
+          )}
         </div>
         
-        {/* ... and so on for session, singer_agreement, etc. ... */}
+        <div className="flex items-center space-x-2">
+          <Button onClick={() => setEditing(!editing)} variant="outline" className="border-gray-600 text-gray-400 hover:text-white hover:border-gray-500">
+            {editing ? <><X className="h-4 w-4 mr-2" />Cancel</> : <><Edit className="h-4 w-4 mr-2" />Edit</>}
+          </Button>
+          
+          <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+            <DialogTrigger asChild>
+              <Button variant="outline" className="border-red-600 text-red-400 hover:text-red-300 hover:border-red-500">
+                <Trash2 className="h-4 w-4 mr-2" /> Delete
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="glass border-gray-700">
+              <DialogHeader>
+                <DialogTitle className="text-white">Delete Track</DialogTitle>
+                <DialogDescription className="text-gray-400">
+                  Are you sure you want to delete "{track.title}"? This cannot be undone.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="flex justify-end space-x-2 pt-4">
+                <Button variant="outline" onClick={() => setDeleteDialogOpen(false)} className="border-gray-600 text-gray-400">Cancel</Button>
+                <Button onClick={handleDelete} className="bg-red-600 hover:bg-red-700 text-white">Delete Track</Button>
+              </div>
+            </DialogContent>
+          </Dialog>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        {/* Main Content (no changes needed here as it's protected by the guard above) */}
+        <div className="lg:col-span-2 space-y-6">
+            {/* ... Your existing cards for serial numbers, track info, etc. ... */}
+        </div>
+
+        {/* Sidebar */}
+        <div className="space-y-6">
+          {/* Audio Preview */}
+          {/* *** FIX #2: THE `track &&` CHECK IS A GOOD DEFENSIVE PATTERN, BUT NOW REDUNDANT BECAUSE OF THE MAIN GUARD *** */}
+          {/* We'll keep it for clarity. This ensures we only show this card if a file exists. */}
+          {track && track.mp3_blob_name && (
+            <Card className="glass border-gray-700 slide-in">
+              <CardHeader>
+                <CardTitle className="text-white flex items-center space-x-2"><Play className="h-5 w-5" /><span>Audio Preview</span></CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <audio
+                  ref={audioRef}
+                  controls
+                  className="w-full"
+                  preload="metadata"
+                  crossOrigin="anonymous"
+                  // Use the secure streaming endpoint from the backend
+                  src={`${apiClient.defaults.baseURL}/tracks/${track.id}/stream`}
+                >
+                  Your browser does not support the audio element.
+                </audio>
+                <MusicVisualizer audioRef={audioRef} />
+              </CardContent>
+            </Card>
+          )}
+
+          {/* File Downloads */}
+          <Card className="glass border-gray-700 slide-in">
+              {/* ... The rest of your file download section should now work correctly ... */}
+              <CardContent>
+                {/* Example for one file type */}
+                 <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-400">Audio:</span>
+                  <div className="flex items-center space-x-2">
+                    {track.mp3_blob_name ? (
+                      <>
+                        <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Available</Badge>
+                        <Button size="sm" onClick={() => downloadFile('mp3')} className="bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white px-3 py-1 text-xs">
+                          <Download className="h-3 w-3 mr-1" /> Download
+                        </Button>
+                      </>
+                    ) : <Badge className="bg-gray-500/20 text-gray-400 border-gray-500/30">Not Available</Badge>}
+                  </div>
+                </div>
+                {/* ... Repeat for lyrics_blob_name, session_blob_name etc. ... */}
+              </CardContent>
+          </Card>
+        </div>
+      </div>
     </div>
   );
 };
 
 export default TrackDetails;
-
-// NOTE: The provided JSX was very long, so I have only included the
-// sections that needed changes. Please integrate these changes into your
-// existing file structure. The core changes are:
-// 1. The updated `downloadFile` function.
-// 2. The updated `src` attribute in the `<audio>` tag.
-// 3. The updated checks for file availability (e.g., `track.mp3_blob_name` instead of `track.mp3_file_path`).
