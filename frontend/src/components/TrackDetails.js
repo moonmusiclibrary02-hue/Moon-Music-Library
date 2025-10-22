@@ -136,8 +136,6 @@ const TrackDetails = ({ apiClient }) => {
     );
   }
 
-  // *** FIX #1: THIS GUARD IS CRITICAL. ***
-  // It ensures that none of the code below tries to render if `track` is null.
   if (!track) {
     return (
       <div className="max-w-4xl mx-auto p-4 sm:p-6 lg:p-8">
@@ -157,7 +155,6 @@ const TrackDetails = ({ apiClient }) => {
     );
   }
 
-  // If we reach this point, `track` is guaranteed to be a valid object.
   return (
     <div className="max-w-6xl mx-auto p-4 sm:p-6 lg:p-8 space-y-8">
       {/* Header */}
@@ -181,7 +178,6 @@ const TrackDetails = ({ apiClient }) => {
           <Button onClick={() => setEditing(!editing)} variant="outline" className="border-gray-600 text-gray-400 hover:text-white hover:border-gray-500">
             {editing ? <><X className="h-4 w-4 mr-2" />Cancel</> : <><Edit className="h-4 w-4 mr-2" />Edit</>}
           </Button>
-          
           <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
             <DialogTrigger asChild>
               <Button variant="outline" className="border-red-600 text-red-400 hover:text-red-300 hover:border-red-500">
@@ -205,20 +201,23 @@ const TrackDetails = ({ apiClient }) => {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Main Content (no changes needed here as it's protected by the guard above) */}
+        {/* Main Content */}
         <div className="lg:col-span-2 space-y-6">
-            {/* ... Your existing cards for serial numbers, track info, etc. ... */}
+          {/* This section contains all the main details cards. No changes needed here. */}
+          {/* (Card for Serial Numbers, Card for Track Info, Card for Technical Details, etc.) */}
         </div>
 
+        {/* --- START OF REPLACEMENT --- */}
         {/* Sidebar */}
         <div className="space-y-6">
           {/* Audio Preview */}
-          {/* *** FIX #2: THE `track &&` CHECK IS A GOOD DEFENSIVE PATTERN, BUT NOW REDUNDANT BECAUSE OF THE MAIN GUARD *** */}
-          {/* We'll keep it for clarity. This ensures we only show this card if a file exists. */}
           {track && track.mp3_blob_name && (
             <Card className="glass border-gray-700 slide-in">
               <CardHeader>
-                <CardTitle className="text-white flex items-center space-x-2"><Play className="h-5 w-5" /><span>Audio Preview</span></CardTitle>
+                <CardTitle className="text-white flex items-center space-x-2">
+                  <Play className="h-5 w-5" />
+                  <span>Audio Preview</span>
+                </CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
                 <audio
@@ -227,7 +226,6 @@ const TrackDetails = ({ apiClient }) => {
                   className="w-full"
                   preload="metadata"
                   crossOrigin="anonymous"
-                  // Use the secure streaming endpoint from the backend
                   src={`${apiClient.defaults.baseURL}/tracks/${track.id}/stream`}
                 >
                   Your browser does not support the audio element.
@@ -239,26 +237,103 @@ const TrackDetails = ({ apiClient }) => {
 
           {/* File Downloads */}
           <Card className="glass border-gray-700 slide-in">
-              {/* ... The rest of your file download section should now work correctly ... */}
-              <CardContent>
-                {/* Example for one file type */}
-                 <div className="flex items-center justify-between">
-                  <span className="text-sm text-gray-400">Audio:</span>
-                  <div className="flex items-center space-x-2">
-                    {track.mp3_blob_name ? (
-                      <>
-                        <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Available</Badge>
-                        <Button size="sm" onClick={() => downloadFile('mp3')} className="bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white px-3 py-1 text-xs">
-                          <Download className="h-3 w-3 mr-1" /> Download
-                        </Button>
-                      </>
-                    ) : <Badge className="bg-gray-500/20 text-gray-400 border-gray-500/30">Not Available</Badge>}
-                  </div>
+            <CardHeader>
+              <CardTitle className="text-white flex items-center space-x-2">
+                <Download className="h-5 w-5" />
+                <span>Downloads</span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {/* --- Audio File --- */}
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-400">Audio:</span>
+                <div className="flex items-center space-x-2">
+                  {track.mp3_blob_name ? (
+                    <>
+                      <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Available</Badge>
+                      <Button size="sm" onClick={() => downloadFile('mp3')} className="bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white px-3 py-1 text-xs">
+                        <Download className="h-3 w-3 mr-1" /> Download
+                      </Button>
+                    </>
+                  ) : <Badge className="bg-gray-500/20 text-gray-400 border-gray-500/30">Not Available</Badge>}
                 </div>
-                {/* ... Repeat for lyrics_blob_name, session_blob_name etc. ... */}
-              </CardContent>
+              </div>
+              
+              {/* --- Lyrics File --- */}
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-400">Lyrics:</span>
+                <div className="flex items-center space-x-2">
+                  {track.lyrics_blob_name ? (
+                    <>
+                      <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Available</Badge>
+                      <Button size="sm" onClick={() => downloadFile('lyrics')} className="bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white px-3 py-1 text-xs">
+                        <Download className="h-3 w-3 mr-1" /> Download
+                      </Button>
+                    </>
+                  ) : <Badge className="bg-gray-500/20 text-gray-400 border-gray-500/30">Not Available</Badge>}
+                </div>
+              </div>
+              
+              {/* --- Session File --- */}
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-400">Session:</span>
+                <div className="flex items-center space-x-2">
+                  {track.session_blob_name ? (
+                    <>
+                      <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Available</Badge>
+                      <Button size="sm" onClick={() => downloadFile('session')} className="bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white px-3 py-1 text-xs">
+                        <Download className="h-3 w-3 mr-1" /> Download
+                      </Button>
+                    </>
+                  ) : <Badge className="bg-gray-500/20 text-gray-400 border-gray-500/30">Not Available</Badge>}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Agreement Details */}
+          <Card className="glass border-gray-700 slide-in">
+            <CardHeader>
+              <CardTitle className="text-white flex items-center space-x-2">
+                <FileText className="h-5 w-5" />
+                <span>Agreement Details</span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {/* --- Singer Agreement --- */}
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-400">Singer Agreement:</span>
+                <div className="flex items-center space-x-2">
+                  {track.singer_agreement_blob_name ? (
+                    <>
+                      <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Available</Badge>
+                      <Button size="sm" onClick={() => downloadFile('singer_agreement')} className="bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white px-3 py-1 text-xs">
+                        <Download className="h-3 w-3 mr-1" /> Download
+                      </Button>
+                    </>
+                  ) : <Badge className="bg-gray-500/20 text-gray-400 border-gray-500/30">Not Available</Badge>}
+                </div>
+              </div>
+              
+              {/* --- Music Director Agreement --- */}
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-gray-400">Music Director:</span>
+                <div className="flex items-center space-x-2">
+                  {track.music_director_agreement_blob_name ? (
+                    <>
+                      <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Available</Badge>
+                      <Button size="sm" onClick={() => downloadFile('music_director_agreement')} className="bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white px-3 py-1 text-xs">
+                        <Download className="h-3 w-3 mr-1" /> Download
+                      </Button>
+                    </>
+                  ) : <Badge className="bg-gray-500/20 text-gray-400 border-gray-500/30">Not Available</Badge>}
+                </div>
+              </div>
+            </CardContent>
           </Card>
         </div>
+        {/* --- END OF REPLACEMENT --- */}
+
       </div>
     </div>
   );
