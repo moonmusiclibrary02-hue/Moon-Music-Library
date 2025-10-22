@@ -39,7 +39,7 @@ load_dotenv()
 # Security
 SECRET_KEY = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8 hours to prevent frequent session expiration
 
 # Simple password hashing with SHA256
 security = HTTPBearer()
@@ -238,12 +238,15 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
         user_id: str = payload.get("sub")
         if user_id is None:
+            logger.warning("JWT token missing 'sub' claim")
             raise HTTPException(status_code=401, detail="Could not validate credentials")
-    except JWTError:
+    except JWTError as e:
+        logger.warning(f"JWT decode error: {str(e)}")
         raise HTTPException(status_code=401, detail="Could not validate credentials")
     
     user = await db.users.find_one({"id": user_id})
     if user is None:
+        logger.warning(f"User not found for ID: {user_id}")
         raise HTTPException(status_code=401, detail="User not found")
     return User(**user)
 
@@ -1778,14 +1781,18 @@ async def generate_upload_url(
     current_user: User = Depends(get_current_user)
 ):
     """Generate a signed URL for direct-to-GCS file upload"""
+    logger.info(f"Upload URL request from user {current_user.id}: folder={folder}, file={filename}, type={content_type}")
+    
     # Check rate limit
     if not upload_rate_limiter.is_allowed(current_user.id):
+        logger.warning(f"Rate limit exceeded for user {current_user.id}")
         raise HTTPException(
             status_code=429,
             detail="Upload rate limit exceeded. Please try again later."
         )
 
     if not GCS_BUCKET_NAME:
+        logger.error("GCS_BUCKET_NAME not configured")
         raise HTTPException(status_code=500, detail="Storage configuration missing")
 
     # Validate folder type
@@ -1846,13 +1853,17 @@ async def generate_upload_url(
     try:
         # Sanitize filename
         safe_filename = sanitize_filename(filename)
+        logger.info(f"Sanitized filename: {safe_filename}")
         
         # Generate unique blob name with UUID and sanitized filename
         blob_name = f"{folder}/{uuid.uuid4()}_{safe_filename}"
+        logger.info(f"Generated blob name: {blob_name}")
+        
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(blob_name)
 
         # Generate v4 signed URL for upload, valid for 15 minutes
+        logger.info(f"Generating signed URL for blob: {blob_name}")
         signed_url = await asyncio.to_thread(
             blob.generate_signed_url,
             expiration=timedelta(minutes=15),
@@ -1862,11 +1873,11 @@ async def generate_upload_url(
         )
 
         # Log upload URL generation for audit
-        logger.info(f"Generated upload URL for user {current_user.id} - folder: {folder}, file: {safe_filename}")
+        logger.info(f"Successfully generated upload URL for user {current_user.id} - folder: {folder}, file: {safe_filename}")
 
     except Exception as e:
-        logger.exception(f"Failed to generate upload URL for {filename}")
-        raise HTTPException(status_code=500, detail="Failed to generate upload URL") from e
+        logger.exception(f"Failed to generate upload URL for {filename}: {type(e).__name__}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate upload URL: {str(e)}") from e
 
     
     return {
