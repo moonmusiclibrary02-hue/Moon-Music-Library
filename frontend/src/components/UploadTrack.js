@@ -413,141 +413,119 @@ const UploadTrack = ({ apiClient }) => {
 
 
 
-  const handleSubmit = async (event) => {
+const handleSubmit = async (event) => {
     event.preventDefault();
     setLoading(true);
 
-    // Reset upload progress at the start
     setUploadProgress({
       mp3_file: 0, lyrics_file: 0, session_file: 0,
       singer_agreement_file: 0, music_director_agreement_file: 0
     });
 
     const currentUploadBlobs = [];
+    const controller = new AbortController(); // Single controller for coordinated abort
 
     try {
       const token = localStorage.getItem('token');
       if (!token) {
-        toast({ title: "Authentication required", description: "Please log in to upload tracks.", variant: "destructive" });
+        toast({ 
+          title: "Authentication required",
+          description: "Please log in to upload tracks.",
+          variant: "destructive" 
+        });
         navigate('/login');
         return;
-      }
-
-      try {
-        await apiClient.get('/auth/me');
-      } catch (authError) {
-        console.error('Authentication check failed:', authError);
-        toast({ title: "Session expired", description: "Your session has expired. Please log in again.", variant: "destructive" });
-        localStorage.removeItem('token');
-        navigate('/login');
-        return;
-      }
-
-      const existingBlobs = Object.values(uploadedBlobsRef.current).filter(Boolean);
-      if (existingBlobs.length > 0) {
-        toast({ title: "Cleaning up", description: "Cleaning up previous upload attempt..." });
-        await cleanupBlobs(existingBlobs);
       }
       
-      const resetState = {
-        mp3_file: null, lyrics_file: null, session_file: null,
-        singer_agreement_file: null, music_director_agreement_file: null
-      };
-      setUploadedBlobs(resetState);
-      uploadedBlobsRef.current = resetState;
-
-      const uploadPromises = [];
-      const fileData = {};
-      const controller = new AbortController();
+      const fileUploadPromises = [];
+      const fileResults = {};
 
       const createUploadPromise = (file, folder, fileType) => {
         return uploadFileToGCS(file, folder, fileType, controller.signal)
           .then(result => {
             if (result && result.blob_name) {
+              // Track blob for cleanup if needed
               currentUploadBlobs.push(result.blob_name);
-              setUploadedBlobs(prev => {
-                const newState = { ...prev, [fileType]: result.blob_name };
-                uploadedBlobsRef.current = newState;
-                return newState;
-              });
+              // Store the successful upload result
+              fileResults[fileType] = {
+                blob_name: result.blob_name,
+                filename: result.filename
+              };
             }
-            return { ...result, fileType };
           })
           .catch(err => {
+            // Abort other uploads if one fails
             controller.abort();
-            err.fileType = fileType;
             throw err;
           });
       };
-
-      if (files.mp3_file) uploadPromises.push(createUploadPromise(files.mp3_file, 'audio', 'mp3_file'));
-      if (files.lyrics_file) uploadPromises.push(createUploadPromise(files.lyrics_file, 'lyrics', 'lyrics_file'));
-      if (files.session_file) uploadPromises.push(createUploadPromise(files.session_file, 'sessions', 'session_file'));
-      if (files.singer_agreement_file) uploadPromises.push(createUploadPromise(files.singer_agreement_file, 'agreements', 'singer_agreement_file'));
-      if (files.music_director_agreement_file) uploadPromises.push(createUploadPromise(files.music_director_agreement_file, 'agreements', 'music_director_agreement_file'));
-
-      const results = await Promise.allSettled(uploadPromises);
       
-      const failures = results.filter(r => r.status === 'rejected');
-      if (failures.length > 0) {
-        // The original error is in the 'reason' property
-        throw failures[0].reason;
+      // Create all upload promises
+      for (const [fileType, file] of Object.entries(files)) {
+        if (file) {
+          const folderMap = {
+            mp3_file: 'audio', 
+            lyrics_file: 'lyrics', 
+            session_file: 'sessions',
+            singer_agreement_file: 'agreements', 
+            music_director_agreement_file: 'agreements'
+          };
+          fileUploadPromises.push(createUploadPromise(file, folderMap[fileType], fileType));
+        }
       }
 
-      results.forEach(result => {
-        if (result.status === 'fulfilled') {
-          const { fileType, blob_name, filename } = result.value;
-          fileData[fileType] = { blob_name, filename };
-        }
-      });
+      // Wait for all file uploads to complete
+      await Promise.all(fileUploadPromises);
+
+      // Now, create the FormData to send to the backend
+      const trackMetadata = new FormData();
       
-      const uploadData = new FormData();
+      // 1. Append all the text-based form data
       Object.entries(formData).forEach(([key, value]) => {
-        if (value) uploadData.append(key, value);
-      });
-
-      Object.entries(fileData).forEach(([fileType, data]) => {
-        const [blobField, filenameField] = blobFieldMap[fileType];
-        if (data?.blob_name) {
-          uploadData.append(blobField, data.blob_name);
-          uploadData.append(filenameField, data.filename);
+        if (value) {
+          trackMetadata.append(key, value);
         }
       });
-      
-      await apiClient.post('/tracks', uploadData, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+
+      // 2. Append the blob names and filenames from the successful uploads
+      Object.entries(fileResults).forEach(([fileType, data]) => {
+        // Use the blobFieldMap to get correct backend field names
+        const [blobField, filenameField] = blobFieldMap[fileType];
+        
+        trackMetadata.append(blobField, data.blob_name);
+        trackMetadata.append(filenameField, data.filename);
       });
 
-      toast({ title: "Success", description: "Track uploaded successfully!" });
+      // 3. Send the complete metadata to the backend
+      await apiClient.post('/tracks', trackMetadata, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      toast({
+        title: "Success",
+        description: "Track created successfully!",
+      });
       navigate('/');
 
     } catch (error) {
-      // THIS IS THE NEW, MORE ROBUST CATCH BLOCK
-      console.error('Submission failed. Raw error object:', error);
-
-      let message = 'An unexpected error occurred during upload.';
+      console.error('Submission failed:', error);
+      const message = error.response?.data?.detail || error.message || 'Failed to upload track';
       
-      // Safely extract the detailed error message from the backend response
-      if (error && error.response && error.response.data && error.response.data.detail) {
-        message = error.response.data.detail;
-      } else if (error && error.message) {
-        message = error.message;
+      // Clean up successfully uploaded blobs if metadata submission fails
+      if (currentUploadBlobs.length > 0) {
+        console.log('Cleaning up blobs after error:', currentUploadBlobs);
+        await cleanupBlobs(currentUploadBlobs).catch(cleanupError => {
+          console.error('Cleanup failed:', cleanupError);
+        });
       }
-
-      // Clean up any files that might have been successfully uploaded before the failure
-      const blobsToClean = Object.values(uploadedBlobsRef.current).filter(Boolean);
-      if (blobsToClean.length > 0) {
-        console.log("Cleaning up blobs after failure:", blobsToClean);
-        await cleanupBlobs(blobsToClean);
-      }
-
+      
       toast({
         title: "Upload failed",
         description: message,
         variant: "destructive"
       });
-      // We don't re-throw the error, preventing the "Uncaught (in promise)" console error.
-    
     } finally {
       setLoading(false);
     }

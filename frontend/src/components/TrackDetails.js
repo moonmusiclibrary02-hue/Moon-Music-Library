@@ -201,10 +201,91 @@ const TrackDetails = ({ apiClient }) => {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        {/* --- START OF REPLACEMENT --- */}
         {/* Main Content */}
         <div className="lg:col-span-2 space-y-6">
-          {/* This section contains all the main details cards. No changes needed here. */}
-          {/* (Card for Serial Numbers, Card for Track Info, Card for Technical Details, etc.) */}
+          {/* Serial Number Details */}
+          <Card className="glass border-gray-700 slide-in">
+            <CardHeader><CardTitle className="text-white flex items-center space-x-2"><FileAudio className="h-5 w-5" /><span>Serial Number Details</span></CardTitle></CardHeader>
+            <CardContent>
+              <div className="flex flex-wrap items-center gap-4">
+                <div className="flex items-center space-x-2"><span className="text-sm text-gray-400">Code:</span><Badge className="bg-orange-500/20 text-orange-400 border-orange-500/30 font-mono">{track.unique_code || 'N/A'}</Badge></div>
+                <div className="flex items-center space-x-2"><span className="text-sm text-gray-400">Serial:</span><Badge className="bg-blue-500/20 text-blue-400 border-blue-500/30 font-mono">{track.serial_number || 'N/A'}</Badge></div>
+                <div className="flex items-center space-x-2"><span className="text-sm text-gray-400">Rights:</span><Badge className={`${track.rights_type === 'original' ? 'bg-green-500/20 text-green-400 border-green-500/30' : 'bg-purple-500/20 text-purple-400 border-purple-500/30'}`}>{track.rights_type === 'original' ? 'Original' : 'Multi Rights'}</Badge></div>
+                {track.track_category && (<div className="flex items-center space-x-2"><span className="text-sm text-gray-400">Category:</span><Badge className="bg-cyan-500/20 text-cyan-400 border-cyan-500/30">{track.track_category === 'original_composition' ? 'Original Composition' : 'Cover Song'}</Badge></div>)}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Basic Information */}
+          <Card className="glass border-gray-700 slide-in">
+            <CardHeader><CardTitle className="text-white flex items-center space-x-2"><Music className="h-5 w-5" /><span>Track Information</span></CardTitle></CardHeader>
+            <CardContent className="space-y-4">
+              {editing ? (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="title" className="text-gray-300">Track Title</Label>
+                      <Input id="title" name="title" value={editForm.title || ''} onChange={handleEditChange} className="bg-gray-800/50 border-gray-600 text-white" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="album_name" className="text-gray-300">Album Name</Label>
+                      <Input id="album_name" name="album_name" value={editForm.album_name || ''} onChange={handleEditChange} className="bg-gray-800/50 border-gray-600 text-white" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="music_composer" className="text-gray-300">Music Composer</Label>
+                      <Input id="music_composer" name="music_composer" value={editForm.music_composer || ''} onChange={handleEditChange} className="bg-gray-800/50 border-gray-600 text-white" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="lyricist" className="text-gray-300">Lyricist</Label>
+                      <Input id="lyricist" name="lyricist" value={editForm.lyricist || ''} onChange={handleEditChange} className="bg-gray-800/50 border-gray-600 text-white" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="singer_name" className="text-gray-300">Singer Name</Label>
+                      <Input id="singer_name" name="singer_name" value={editForm.singer_name || ''} onChange={handleEditChange} className="bg-gray-800/50 border-gray-600 text-white" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="audio_language" className="text-gray-300">Language</Label>
+                      <Input id="audio_language" name="audio_language" value={editForm.audio_language || ''} onChange={handleEditChange} className="bg-gray-800/50 border-gray-600 text-white" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="tempo" className="text-gray-300">Tempo (BPM)</Label>
+                      <Input id="tempo" name="tempo" value={editForm.tempo || ''} onChange={handleEditChange} className="bg-gray-800/50 border-gray-600 text-white" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="scale" className="text-gray-300">Scale/Key</Label>
+                      <Input id="scale" name="scale" value={editForm.scale || ''} onChange={handleEditChange} className="bg-gray-800/50 border-gray-600 text-white" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="release_date" className="text-gray-300">Release Date</Label>
+                      <Input id="release_date" name="release_date" type="date" value={editForm.release_date || ''} onChange={handleEditChange} className="bg-gray-800/50 border-gray-600 text-white" />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="other_info" className="text-gray-300">Additional Information</Label>
+                    <Textarea id="other_info" name="other_info" value={editForm.other_info || ''} onChange={handleEditChange} rows={3} className="bg-gray-800/50 border-gray-600 text-white resize-none" />
+                  </div>
+                  <div className="flex justify-end space-x-2 pt-4">
+                    <Button onClick={() => setEditing(false)} variant="outline" className="border-gray-600 text-gray-400">Cancel</Button>
+                    <Button onClick={handleSaveEdit} className="bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 text-white"><Save className="h-4 w-4 mr-2" />Save Changes</Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-4">
+                    <div className="flex items-center space-x-3"><User className="h-5 w-5 text-orange-500" /><div><p className="text-sm text-gray-400">Music Composer</p><p className="text-white font-medium">{track.music_composer}</p></div></div>
+                    <div className="flex items-center space-x-3"><Edit className="h-5 w-5 text-orange-500" /><div><p className="text-sm text-gray-400">Lyricist</p><p className="text-white font-medium">{track.lyricist}</p></div></div>
+                    <div className="flex items-center space-x-3"><Mic className="h-5 w-5 text-orange-500" /><div><p className="text-sm text-gray-400">Singer</p><p className="text-white font-medium">{track.singer_name}</p></div></div>
+                  </div>
+                  <div className="space-y-4">
+                    <div className="flex items-center space-x-3"><Globe className="h-5 w-5 text-orange-500" /><div><p className="text-sm text-gray-400">Language</p><p className="text-white font-medium">{track.audio_language}</p></div></div>
+                    <div className="flex items-center space-x-3"><Calendar className="h-5 w-5 text-orange-500" /><div><p className="text-sm text-gray-400">Release Date</p><p className="text-white font-medium">{formatDate(track.release_date)}</p></div></div>
+                    <div className="flex items-center space-x-3"><Clock className="h-5 w-5 text-orange-500" /><div><p className="text-sm text-gray-400">Added</p><p className="text-white font-medium">{formatDate(track.created_at)}</p></div></div>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </div>
 
         {/* --- START OF REPLACEMENT --- */}
