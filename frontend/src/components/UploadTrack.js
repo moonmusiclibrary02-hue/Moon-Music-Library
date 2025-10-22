@@ -422,6 +422,33 @@ const UploadTrack = ({ apiClient }) => {
     const currentUploadBlobs = [];
 
     try {
+      // Verify authentication token exists and is valid
+      const token = localStorage.getItem('token');
+      if (!token) {
+        toast({
+          title: "Authentication required",
+          description: "Please log in to upload tracks.",
+          variant: "destructive"
+        });
+        navigate('/login');
+        return;
+      }
+
+      // Validate token with backend before starting upload
+      try {
+        await apiClient.get('/auth/me');
+      } catch (authError) {
+        console.error('Authentication check failed:', authError);
+        toast({
+          title: "Session expired",
+          description: "Your session has expired. Please log in again.",
+          variant: "destructive"
+        });
+        localStorage.removeItem('token');
+        navigate('/login');
+        return;
+      }
+
       // Clean up any previous incomplete uploads before starting (use ref for sync access)
       const existingBlobs = Object.values(uploadedBlobsRef.current).filter(Boolean);
       if (existingBlobs.length > 0) {
