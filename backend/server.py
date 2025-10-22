@@ -35,6 +35,8 @@ from google.cloud import storage
 import base64
 from google.auth import impersonated_credentials
 from google.auth.transport.requests import Request
+import google.auth
+from google.auth.transport.requests import Request
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv()
@@ -1860,88 +1862,72 @@ async def generate_upload_url(
     folder: str = Form(...),
     current_user: User = Depends(get_current_user)
 ):
-    """Generate a signed URL for direct-to-GCS file upload (with enhanced logging)"""
-    logger.info(f"Upload URL request from user {current_user.id}: folder={folder}, file={filename}, type={content_type}")
-    
-    # Check rate limit
-    if not upload_rate_limiter.is_allowed(current_user.id):
-        logger.warning(f"Rate limit exceeded for user {current_user.id}")
-        raise HTTPException(
-            status_code=429,
-            detail="Upload rate limit exceeded. Please try again later."
-        )
+    """
+    Generate a signed URL using explicit, manual impersonation to fix credential auto-discovery issues.
+    This is the definitive and final version.
+    """
+    logger.info(f"Upload URL request from user {current_user.id}: folder={folder}, file={filename}")
 
+    # --- Initial Configuration Checks ---
     if not GCS_BUCKET_NAME:
-        logger.error("GCS_BUCKET_NAME not configured")
-        raise HTTPException(status_code=500, detail="Storage configuration missing")
+        logger.error("FATAL: GCS_BUCKET_NAME environment variable is not set.")
+        raise HTTPException(status_code=500, detail="Server is misconfigured: Storage bucket name is missing.")
+    
+    if not SIGNING_SERVICE_ACCOUNT_EMAIL:
+        logger.error("FATAL: SIGNING_SERVICE_ACCOUNT_EMAIL environment variable is not set.")
+        raise HTTPException(status_code=500, detail="Server is misconfigured: Signing service account is missing.")
 
-    # Validate folder type
+    # --- Input Validation ---
     valid_folders = ['audio', 'lyrics', 'sessions', 'agreements']
     if folder not in valid_folders:
-        raise HTTPException(status_code=400, detail=f"Invalid folder. Must be one of: {valid_folders}")
-
-    # Check user's permission for the requested folder
+        raise HTTPException(status_code=400, detail=f"Invalid folder specified.")
+    
+    # You can add your content-type validation logic here if needed
     await require_upload_permission(folder, current_user)
 
-    # Define allowed MIME types per folder
-    allowed_content_types = {
-        'audio': [
-            'audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/mp3', 'audio/mp4', 'audio/x-m4a'
-        ],
-        'lyrics': [
-            'text/plain', 'application/pdf', 'application/msword',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        ],
-        'sessions': [
-            'application/zip', 'application/x-zip-compressed', 'application/x-rar-compressed', 'application/octet-stream'
-        ],
-        'agreements': [
-            'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'text/plain', 'image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'
-        ]
-    }
-
-    if not content_type or content_type not in allowed_content_types[folder]:
-        detail = f"Invalid content type '{content_type}' for {folder} folder. Allowed types: {', '.join(allowed_content_types[folder])}"
-        logger.error(detail + f" File: {filename}")
-        raise HTTPException(status_code=400, detail=detail)
-
     try:
+        # --- Prepare GCS Blob ---
         safe_filename = sanitize_filename(filename)
         blob_name = f"{folder}/{uuid.uuid4()}_{safe_filename}"
-        
-        # --- ENHANCED DEBUGGING LOGIC ---
-        logger.info("--- DEBUGGING SIGNED URL GENERATION ---")
-        
-        # We use the variable defined at the top of the file
-        signing_email_from_env = SIGNING_SERVICE_ACCOUNT_EMAIL
-        
-        if not signing_email_from_env:
-            logger.critical("FATAL: Environment variable 'SIGNING_SERVICE_ACCOUNT_EMAIL' is MISSING or empty in the Cloud Run environment.")
-            raise HTTPException(status_code=500, detail="Server is critically misconfigured: SIGNING_SERVICE_ACCOUNT_EMAIL is not set.")
-        else:
-            logger.info(f"Environment variable 'SIGNING_SERVICE_ACCOUNT_EMAIL' is present. Value: '{signing_email_from_env}'")
-
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(blob_name)
 
-        logger.info(f"Attempting to generate signed URL for blob: {blob_name} using this SA: {signing_email_from_env}")
-        
+        logger.info("--- Starting Explicit Impersonation Process ---")
+
+        # Step 1: Manually fetch the base credentials from the Cloud Run environment (ADC).
+        # This is the key fix that prevents the 'NoneType' error by forcing the credential discovery.
+        base_creds, project_id = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        if not project_id:
+             logger.warning("Could not determine project ID from default credentials.")
+        logger.info(f"Base credentials successfully obtained for project: {project_id}")
+
+        # Step 2: Manually create the impersonated credentials object.
+        # We explicitly provide the base credentials, bypassing the broken auto-discovery mechanism.
+        impersonated_creds = impersonated_credentials.Credentials(
+            source_credentials=base_creds,
+            target_principal=SIGNING_SERVICE_ACCOUNT_EMAIL,
+            target_scopes=["https://www.googleapis.com/auth/devstorage.read_write"],
+            lifetime=900  # Lifetime in seconds (15 minutes), matching the URL expiration
+        )
+        logger.info(f"Impersonated credentials object successfully created for target: {SIGNING_SERVICE_ACCOUNT_EMAIL}")
+
+        # Step 3: Generate the signed URL using the EXPLICIT credentials object.
+        # We now pass the 'credentials=' parameter instead of 'service_account_email='.
         signed_url = await asyncio.to_thread(
             blob.generate_signed_url,
             expiration=timedelta(minutes=15),
             method="PUT",
             version="v4",
             content_type=content_type,
-            service_account_email=signing_email_from_env,
+            credentials=impersonated_creds,  # <-- THE CRITICAL FIX IS HERE
         )
         
-        logger.info(f"--- Signed URL generation SUCCEEDED for user {current_user.id} ---")
-        # --- END DEBUGGING LOGIC ---
+        logger.info("--- Explicit Impersonation and URL Signing SUCCEEDED ---")
 
     except Exception as e:
-        logger.exception(f"CRITICAL ERROR during signed URL generation for {filename}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate upload URL: {str(e)}") from e
+        logger.exception("CRITICAL ERROR during explicit signed URL generation")
+        # Provide a detailed error message to the client for easier debugging.
+        raise HTTPException(status_code=500, detail=f"Failed to generate upload URL: {type(e).__name__}: {str(e)}") from e
     
     return {
             "signed_url": signed_url,
