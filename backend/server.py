@@ -1774,6 +1774,15 @@ async def update_track(
     updated_track = await db.tracks.find_one({"id": track_id})
     return MusicTrack(**parse_from_mongo(updated_track))
 
+@api_router.get("/verify-deployment")
+async def verify_deployment():
+    """A simple endpoint to confirm the latest code is deployed."""
+    return {
+        "message": "Deployment successful! The new code is live.",
+        "version": "v3-library-update-check",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
 @api_router.post("/tracks/generate-upload-url")
 async def generate_upload_url(
     filename: str = Form(...),
@@ -1781,7 +1790,7 @@ async def generate_upload_url(
     folder: str = Form(...),
     current_user: User = Depends(get_current_user)
 ):
-    """Generate a signed URL for direct-to-GCS file upload"""
+    """Generate a signed URL for direct-to-GCS file upload (with enhanced logging)"""
     logger.info(f"Upload URL request from user {current_user.id}: folder={folder}, file={filename}, type={content_type}")
     
     # Check rate limit
@@ -1807,90 +1816,62 @@ async def generate_upload_url(
     # Define allowed MIME types per folder
     allowed_content_types = {
         'audio': [
-            'audio/mpeg',
-            'audio/wav',
-            'audio/x-wav',
-            'audio/mp3',
-            'audio/mp4',
-            'audio/x-m4a'
+            'audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/mp3', 'audio/mp4', 'audio/x-m4a'
         ],
         'lyrics': [
-            'text/plain',
-            'application/pdf',
-            'application/msword',
+            'text/plain', 'application/pdf', 'application/msword',
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         ],
         'sessions': [
-            'application/zip',
-            'application/x-zip-compressed',
-            'application/x-rar-compressed',
-            'application/octet-stream'  # For some ZIP/RAR files
+            'application/zip', 'application/x-zip-compressed', 'application/x-rar-compressed', 'application/octet-stream'
         ],
         'agreements': [
-            'application/pdf',
-            'application/msword',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'text/plain',
-            'image/jpeg',
-            'image/jpg',
-            'image/png',
-            'image/webp',
-            'image/gif'
+            'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'text/plain', 'image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'
         ]
     }
 
-    # Validate content type
-    if not content_type:
-        logger.error(f"Content type missing for file: {filename}")
-        raise HTTPException(status_code=400, detail="Content type is required")
-
-    if content_type not in allowed_content_types[folder]:
-        logger.error(f"Invalid content type '{content_type}' for folder '{folder}'. File: {filename}")
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid content type '{content_type}' for {folder} folder. Allowed types: {', '.join(allowed_content_types[folder])}"
-        )
+    if not content_type or content_type not in allowed_content_types[folder]:
+        detail = f"Invalid content type '{content_type}' for {folder} folder. Allowed types: {', '.join(allowed_content_types[folder])}"
+        logger.error(detail + f" File: {filename}")
+        raise HTTPException(status_code=400, detail=detail)
 
     try:
-        # Sanitize filename
         safe_filename = sanitize_filename(filename)
-        logger.info(f"Sanitized filename: {safe_filename}")
-        
-        # Generate unique blob name with UUID and sanitized filename
         blob_name = f"{folder}/{uuid.uuid4()}_{safe_filename}"
-        logger.info(f"Generated blob name: {blob_name}")
         
+        # --- ENHANCED DEBUGGING LOGIC ---
+        logger.info("--- DEBUGGING SIGNED URL GENERATION ---")
+        
+        # We use the variable defined at the top of the file
+        signing_email_from_env = SIGNING_SERVICE_ACCOUNT_EMAIL
+        
+        if not signing_email_from_env:
+            logger.critical("FATAL: Environment variable 'SIGNING_SERVICE_ACCOUNT_EMAIL' is MISSING or empty in the Cloud Run environment.")
+            raise HTTPException(status_code=500, detail="Server is critically misconfigured: SIGNING_SERVICE_ACCOUNT_EMAIL is not set.")
+        else:
+            logger.info(f"Environment variable 'SIGNING_SERVICE_ACCOUNT_EMAIL' is present. Value: '{signing_email_from_env}'")
+
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(blob_name)
 
-        # --- START OF MODIFICATION ---
-        # The environment variable for the service account email is now required.
-        # This is crucial for signing URLs in a token-based credential environment like Cloud Run.
-        if not SIGNING_SERVICE_ACCOUNT_EMAIL:
-            logger.critical("FATAL: SIGNING_SERVICE_ACCOUNT_EMAIL environment variable is not set. Cannot generate signed URLs.")
-            raise HTTPException(status_code=500, detail="Server is misconfigured for generating upload URLs.")
-
-        logger.info(f"Generating signed URL for blob: {blob_name} using service account: {SIGNING_SERVICE_ACCOUNT_EMAIL}")
+        logger.info(f"Attempting to generate signed URL for blob: {blob_name} using this SA: {signing_email_from_env}")
         
-        # Generate v4 signed URL for upload, valid for 15 minutes.
-        # The 'service_account_email' parameter delegates the signing operation.
         signed_url = await asyncio.to_thread(
             blob.generate_signed_url,
             expiration=timedelta(minutes=15),
             method="PUT",
             version="v4",
             content_type=content_type,
-            service_account_email=SIGNING_SERVICE_ACCOUNT_EMAIL, # This is the critical line that fixes the error
+            service_account_email=signing_email_from_env,
         )
-        # --- END OF MODIFICATION ---
-
-        # Log upload URL generation for audit
-        logger.info(f"Successfully generated upload URL for user {current_user.id} - folder: {folder}, file: {safe_filename}")
+        
+        logger.info(f"--- Signed URL generation SUCCEEDED for user {current_user.id} ---")
+        # --- END DEBUGGING LOGIC ---
 
     except Exception as e:
-        logger.exception(f"Failed to generate upload URL for {filename}: {type(e).__name__}: {str(e)}")
+        logger.exception(f"CRITICAL ERROR during signed URL generation for {filename}")
         raise HTTPException(status_code=500, detail=f"Failed to generate upload URL: {str(e)}") from e
-
     
     return {
             "signed_url": signed_url,
