@@ -36,7 +36,7 @@ import base64
 from google.auth import impersonated_credentials
 from google.auth.transport.requests import Request
 import google.auth
-from google.auth.transport.requests import Request
+
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv()
