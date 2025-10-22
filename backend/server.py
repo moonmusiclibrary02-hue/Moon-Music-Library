@@ -32,6 +32,9 @@ import urllib.request
 import re
 from urllib.parse import urlparse, parse_qs
 from google.cloud import storage
+import base64
+from google.auth import impersonated_credentials
+from google.auth.transport.requests import Request
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv()
@@ -1783,6 +1786,54 @@ async def verify_deployment():
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
+@api_router.get("/verify-signing")
+async def verify_signing():
+    """
+    An advanced diagnostic endpoint to test the core IAM signing permission,
+    bypassing the GCS library entirely.
+    """
+    try:
+        logger.info("--- Starting core signing verification ---")
+        
+        # This is the service account your Cloud Run service uses
+        target_service_account = os.environ.get('SIGNING_SERVICE_ACCOUNT_EMAIL')
+        if not target_service_account:
+            raise ValueError("SIGNING_SERVICE_ACCOUNT_EMAIL env var is not set.")
+
+        logger.info(f"Attempting to sign using the identity of: {target_service_account}")
+        
+        # We create credentials that are "impersonating" our own service account.
+        # This is the action that requires the 'Service Account Token Creator' role.
+        creds = impersonated_credentials.Credentials(
+            source_credentials=None,  # Use application default credentials
+            target_principal=target_service_account,
+            target_scopes=["https://www.googleapis.com/auth/devstorage.read_write"],
+            # The signer is the IAM Credentials API, not a local private key
+        )
+        
+        # The data we want to sign
+        payload_to_sign = "test-payload-for-signing".encode('utf-8')
+
+        # This is the direct call to the IAM Credentials API to sign a blob of bytes.
+        # This is what the GCS library *should* be doing under the hood.
+        signed_blob = await asyncio.to_thread(creds.sign_bytes, payload_to_sign)
+
+        logger.info("--- Core signing verification SUCCEEDED ---")
+        
+        return {
+            "status": "SUCCESS",
+            "message": "The service account has the required permissions to sign data using the IAM Credentials API.",
+            "signed_payload_base64": base64.b64encode(signed_blob).decode('utf-8')
+        }
+
+    except Exception as e:
+        logger.exception("--- Core signing verification FAILED ---")
+        return {
+            "status": "FAILED",
+            "error_type": type(e).__name__,
+            "error_message": str(e),
+            "instructions": "This failure indicates a fundamental permissions issue, likely from a Google Cloud Organization Policy. Please contact your GCP administrator with this error message."
+        }
 
 @api_router.get("/verify-libraries")
 async def verify_libraries():
