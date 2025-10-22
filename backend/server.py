@@ -1458,6 +1458,18 @@ async def create_track(
     album_name: Optional[str] = Form(None),
     other_info: Optional[str] = Form(None),
     managed_by: Optional[str] = Form(None),
+    # GCS blob names and filenames from frontend
+    mp3_blob_name: Optional[str] = Form(None),
+    mp3_filename: Optional[str] = Form(None),
+    lyrics_blob_name: Optional[str] = Form(None),
+    lyrics_filename: Optional[str] = Form(None),
+    session_blob_name: Optional[str] = Form(None),
+    session_filename: Optional[str] = Form(None),
+    singer_agreement_blob_name: Optional[str] = Form(None),
+    singer_agreement_filename: Optional[str] = Form(None),
+    music_director_agreement_blob_name: Optional[str] = Form(None),
+    music_director_agreement_filename: Optional[str] = Form(None),
+    # Legacy: Still accept file uploads for backward compatibility
     mp3_file: Optional[UploadFile] = File(None),
     lyrics_file: Optional[UploadFile] = File(None),
     session_file: Optional[UploadFile] = File(None),
@@ -1546,26 +1558,34 @@ async def create_track(
     
     serial_number = f"{prefix}{next_number:04d}"  # Format as OC0001, MR0001, etc.
     
-    # Validate file sizes (500MB limit)
+    # Validate file sizes (500MB limit) - only for direct file uploads
     max_size = 500 * 1024 * 1024  # 500MB in bytes
     
-    # These variables will hold the public URLs from GCS
-    mp3_url = None
-    lyrics_url = None
-    session_url = None
-    singer_agreement_url = None
-    music_director_agreement_url = None
-    # Upload each file to its designated folder in GCS
+    # Handle file uploads (legacy) OR use provided blob names (new GCS workflow)
+    # If blob names are provided, use them directly (frontend already uploaded to GCS)
+    # Otherwise, upload files directly to GCS (backward compatibility)
+    
+    # Upload files if provided, otherwise use blob names from frontend
     if mp3_file:
-        mp3_url = await upload_to_gcs(mp3_file, "audio")
+        mp3_blob_name = await upload_to_gcs(mp3_file, "audio")
+        mp3_filename = mp3_file.filename
+    # If no file but blob name provided, we're using the new workflow
+    
     if lyrics_file:
-        lyrics_url = await upload_to_gcs(lyrics_file, "lyrics")
+        lyrics_blob_name = await upload_to_gcs(lyrics_file, "lyrics")
+        lyrics_filename = lyrics_file.filename
+        
     if session_file:
-        session_url = await upload_to_gcs(session_file, "sessions")
+        session_blob_name = await upload_to_gcs(session_file, "sessions")
+        session_filename = session_file.filename
+        
     if singer_agreement_file:
-        singer_agreement_url = await upload_to_gcs(singer_agreement_file, "agreements")
+        singer_agreement_blob_name = await upload_to_gcs(singer_agreement_file, "agreements")
+        singer_agreement_filename = singer_agreement_file.filename
+        
     if music_director_agreement_file:
-        music_director_agreement_url = await upload_to_gcs(music_director_agreement_file, "agreements")
+        music_director_agreement_blob_name = await upload_to_gcs(music_director_agreement_file, "agreements")
+        music_director_agreement_filename = music_director_agreement_file.filename
     
     # For managers, validate that they're uploading in their assigned language
     if current_user.user_type == "manager" and current_user.manager_id:
@@ -1597,17 +1617,18 @@ async def create_track(
         release_date=release_date,
         album_name=album_name,
         other_info=other_info,
-        mp3_file_path=mp3_url,
-        lyrics_file_path=lyrics_url,
-        session_file_path=session_url,
-        singer_agreement_file_path=singer_agreement_url,
-        music_director_agreement_file_path=music_director_agreement_url,
-        # We can store the original filenames for user convenience
-        mp3_filename=mp3_file.filename if mp3_file else None,
-        lyrics_filename=lyrics_file.filename if lyrics_file else None,
-        session_filename=session_file.filename if session_file else None,
-        singer_agreement_filename=singer_agreement_file.filename if singer_agreement_file else None,
-        music_director_agreement_filename=music_director_agreement_file.filename if music_director_agreement_file else None,
+        # Store GCS blob names
+        mp3_blob_name=mp3_blob_name,
+        lyrics_blob_name=lyrics_blob_name,
+        session_blob_name=session_blob_name,
+        singer_agreement_blob_name=singer_agreement_blob_name,
+        music_director_agreement_blob_name=music_director_agreement_blob_name,
+        # Store original filenames
+        mp3_filename=mp3_filename,
+        lyrics_filename=lyrics_filename,
+        session_filename=session_filename,
+        singer_agreement_filename=singer_agreement_filename,
+        music_director_agreement_filename=music_director_agreement_filename,
         created_by=current_user.id,
         managed_by=managed_by
     )
