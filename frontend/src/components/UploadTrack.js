@@ -411,81 +411,58 @@ const UploadTrack = ({ apiClient }) => {
     }
   };
 
+
+
   const handleSubmit = async (event) => {
     event.preventDefault();
     setLoading(true);
 
     // Reset upload progress at the start
     setUploadProgress({
-      mp3_file: 0,
-      lyrics_file: 0,
-      session_file: 0,
-      singer_agreement_file: 0,
-      music_director_agreement_file: 0
+      mp3_file: 0, lyrics_file: 0, session_file: 0,
+      singer_agreement_file: 0, music_director_agreement_file: 0
     });
 
-    // Track blobs for this upload attempt (accessible to both try and catch)
     const currentUploadBlobs = [];
 
     try {
-      // Verify authentication token exists and is valid
       const token = localStorage.getItem('token');
       if (!token) {
-        toast({
-          title: "Authentication required",
-          description: "Please log in to upload tracks.",
-          variant: "destructive"
-        });
+        toast({ title: "Authentication required", description: "Please log in to upload tracks.", variant: "destructive" });
         navigate('/login');
         return;
       }
 
-      // Validate token with backend before starting upload
       try {
         await apiClient.get('/auth/me');
       } catch (authError) {
         console.error('Authentication check failed:', authError);
-        toast({
-          title: "Session expired",
-          description: "Your session has expired. Please log in again.",
-          variant: "destructive"
-        });
+        toast({ title: "Session expired", description: "Your session has expired. Please log in again.", variant: "destructive" });
         localStorage.removeItem('token');
         navigate('/login');
         return;
       }
 
-      // Clean up any previous incomplete uploads before starting (use ref for sync access)
       const existingBlobs = Object.values(uploadedBlobsRef.current).filter(Boolean);
       if (existingBlobs.length > 0) {
-        toast({
-          title: "Cleaning up",
-          description: "Cleaning up previous upload attempt...",
-        });
+        toast({ title: "Cleaning up", description: "Cleaning up previous upload attempt..." });
         await cleanupBlobs(existingBlobs);
       }
       
-      // Reset upload tracking state synchronously to prevent race conditions
       const resetState = {
-        mp3_file: null,
-        lyrics_file: null,
-        session_file: null,
-        singer_agreement_file: null,
-        music_director_agreement_file: null
+        mp3_file: null, lyrics_file: null, session_file: null,
+        singer_agreement_file: null, music_director_agreement_file: null
       };
       setUploadedBlobs(resetState);
       uploadedBlobsRef.current = resetState;
 
-      // Upload all files in parallel with coordinated abort
       const uploadPromises = [];
       const fileData = {};
-      const controller = new AbortController(); // Single controller for all uploads
+      const controller = new AbortController();
 
-      // Helper to create an upload promise that handles both success and failure
       const createUploadPromise = (file, folder, fileType) => {
         return uploadFileToGCS(file, folder, fileType, controller.signal)
           .then(result => {
-            // Track the blob both for cleanup and future retries
             if (result && result.blob_name) {
               currentUploadBlobs.push(result.blob_name);
               setUploadedBlobs(prev => {
@@ -497,106 +474,38 @@ const UploadTrack = ({ apiClient }) => {
             return { ...result, fileType };
           })
           .catch(err => {
-            // Abort other uploads when one fails
             controller.abort();
-            // Set fileType on the error to preserve stack trace
             err.fileType = fileType;
             throw err;
           });
       };
 
-      if (files.mp3_file) {
-        uploadPromises.push(
-          createUploadPromise(files.mp3_file, 'audio', 'mp3_file')
-        );
-      }
+      if (files.mp3_file) uploadPromises.push(createUploadPromise(files.mp3_file, 'audio', 'mp3_file'));
+      if (files.lyrics_file) uploadPromises.push(createUploadPromise(files.lyrics_file, 'lyrics', 'lyrics_file'));
+      if (files.session_file) uploadPromises.push(createUploadPromise(files.session_file, 'sessions', 'session_file'));
+      if (files.singer_agreement_file) uploadPromises.push(createUploadPromise(files.singer_agreement_file, 'agreements', 'singer_agreement_file'));
+      if (files.music_director_agreement_file) uploadPromises.push(createUploadPromise(files.music_director_agreement_file, 'agreements', 'music_director_agreement_file'));
 
-      if (files.lyrics_file) {
-        uploadPromises.push(
-          createUploadPromise(files.lyrics_file, 'lyrics', 'lyrics_file')
-        );
-      }
-
-      if (files.session_file) {
-        uploadPromises.push(
-          createUploadPromise(files.session_file, 'sessions', 'session_file')
-        );
-      }
-
-      if (files.singer_agreement_file) {
-        uploadPromises.push(
-          createUploadPromise(files.singer_agreement_file, 'agreements', 'singer_agreement_file')
-        );
-      }
-
-      if (files.music_director_agreement_file) {
-        uploadPromises.push(
-          createUploadPromise(files.music_director_agreement_file, 'agreements', 'music_director_agreement_file')
-        );
-      }
-
-      // Wait for all uploads to complete and process results
       const results = await Promise.allSettled(uploadPromises);
       
-      // Process results
-      const failures = [];
+      const failures = results.filter(r => r.status === 'rejected');
+      if (failures.length > 0) {
+        // The original error is in the 'reason' property
+        throw failures[0].reason;
+      }
+
       results.forEach(result => {
         if (result.status === 'fulfilled') {
           const { fileType, blob_name, filename } = result.value;
           fileData[fileType] = { blob_name, filename };
-        } else {
-          failures.push(result.reason);
         }
       });
-
-      // If there were any failures, clean up blobs from this attempt and throw error
-      if (failures.length > 0) {
-        if (currentUploadBlobs.length > 0) {
-          await cleanupBlobs(currentUploadBlobs);
-          // Reset upload tracking state and progress for failed files
-          setUploadedBlobs(prev => {
-            const newState = { ...prev };
-            failures.forEach(failure => {
-              const error = failure.reason || failure.value;
-              const fileType = error?.fileType;
-              if (fileType) {
-                newState[fileType] = null;
-              }
-            });
-            return newState;
-          });
-          setUploadProgress(prev => {
-            const newProgress = { ...prev };
-            failures.forEach(failure => {
-              const error = failure.reason || failure.value;
-              const fileType = error?.fileType;
-              if (fileType) {
-                newProgress[fileType] = 0;
-              }
-            });
-            return newProgress;
-          });
-        }
-        // Get the original error (now it's the error itself, not wrapped)
-        const firstFailure = failures[0];
-        const error = firstFailure.reason || firstFailure.value;
-        throw error;
-      }
-
-      // Create form data with metadata and blob references
-      const uploadData = new FormData();
       
-      // Add metadata from component state
+      const uploadData = new FormData();
       Object.entries(formData).forEach(([key, value]) => {
-        if (value) {
-          uploadData.append(key, value);
-        }
+        if (value) uploadData.append(key, value);
       });
 
-      // Map of file types to their corresponding form field names
-
-
-      // Add blob names and filenames
       Object.entries(fileData).forEach(([fileType, data]) => {
         const [blobField, filenameField] = blobFieldMap[fileType];
         if (data?.blob_name) {
@@ -604,26 +513,31 @@ const UploadTrack = ({ apiClient }) => {
           uploadData.append(filenameField, data.filename);
         }
       });
-      // Submit track metadata to backend
-      const response = await apiClient.post('/tracks', uploadData, {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        }
-      });
-
-      toast({
-        title: "Success",
-        description: "Track uploaded successfully!",
-      });
-      navigate('/');
-    } catch (error) {
-      console.error('Submission error:', error);
-      const message = error.response?.data?.detail || error.message || 'Failed to upload track';
-
-      // Clean up any successfully uploaded blobs from this attempt
-      const blobsToClean = currentUploadBlobs.filter(Boolean);
       
+      await apiClient.post('/tracks', uploadData, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+
+      toast({ title: "Success", description: "Track uploaded successfully!" });
+      navigate('/');
+
+    } catch (error) {
+      // THIS IS THE NEW, MORE ROBUST CATCH BLOCK
+      console.error('Submission failed. Raw error object:', error);
+
+      let message = 'An unexpected error occurred during upload.';
+      
+      // Safely extract the detailed error message from the backend response
+      if (error && error.response && error.response.data && error.response.data.detail) {
+        message = error.response.data.detail;
+      } else if (error && error.message) {
+        message = error.message;
+      }
+
+      // Clean up any files that might have been successfully uploaded before the failure
+      const blobsToClean = Object.values(uploadedBlobsRef.current).filter(Boolean);
       if (blobsToClean.length > 0) {
+        console.log("Cleaning up blobs after failure:", blobsToClean);
         await cleanupBlobs(blobsToClean);
       }
 
@@ -632,7 +546,8 @@ const UploadTrack = ({ apiClient }) => {
         description: message,
         variant: "destructive"
       });
-      throw error; // Re-throw the original error after cleanup
+      // We don't re-throw the error, preventing the "Uncaught (in promise)" console error.
+    
     } finally {
       setLoading(false);
     }
