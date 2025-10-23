@@ -22,6 +22,7 @@ const TrackDetails = ({ apiClient }) => {
   const [editForm, setEditForm] = useState({});
   const audioRef = useRef(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [audioUrl, setAudioUrl] = useState(null); // Store signed URL for audio
 
   useEffect(() => {
     const fetchTrack = async () => {
@@ -33,6 +34,24 @@ const TrackDetails = ({ apiClient }) => {
         });
         setTrack(response.data);
         setEditForm(response.data);
+        
+        // Fetch signed URL for audio streaming if mp3 exists
+        if (response.data.mp3_blob_name) {
+          try {
+            const streamResponse = await apiClient.get(`/tracks/${id}/stream`, {
+              headers: { Authorization: `Bearer ${token}` },
+              maxRedirects: 0,
+              validateStatus: (status) => status === 307 || status === 200
+            });
+            
+            if (streamResponse.status === 307) {
+              const signedUrl = streamResponse.headers.location || streamResponse.data;
+              setAudioUrl(signedUrl);
+            }
+          } catch (audioError) {
+            console.error('Error fetching audio stream URL:', audioError);
+          }
+        }
       } catch (error) {
         console.error('Error fetching track:', error);
         const message = error.response?.data?.detail || 'Failed to load track details';
@@ -288,7 +307,7 @@ const TrackDetails = ({ apiClient }) => {
         {/* Sidebar */}
         <div className="space-y-6">
           {/* Audio Preview */}
-          {track && track.mp3_blob_name && (
+          {track && track.mp3_blob_name && audioUrl && (
             <Card className="glass border-gray-700 slide-in">
               <CardHeader>
                 <CardTitle className="text-white flex items-center space-x-2">
@@ -303,7 +322,8 @@ const TrackDetails = ({ apiClient }) => {
                   className="w-full"
                   preload="metadata"
                   crossOrigin="anonymous"
-                  src={`${apiClient.defaults.baseURL}/tracks/${track.id}/stream`}
+                  src={audioUrl}
+                  key={audioUrl}
                 >
                   Your browser does not support the audio element.
                 </audio>
