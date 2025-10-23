@@ -90,32 +90,28 @@ const TrackDetails = ({ apiClient }) => {
     }
   };
   
-  const downloadFile = (fileType) => {
-    toast.info(`Preparing ${fileType} file for download...`);
-    apiClient.get(`/tracks/${id}/download/${fileType}`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` },
-        responseType: 'blob',
-    }).then(response => {
-        const url = window.URL.createObjectURL(new Blob([response.data]));
-        const link = document.createElement('a');
-        const contentDisposition = response.headers['content-disposition'];
-        let filename = `${track.title}_${fileType}.dat`;
-        if (contentDisposition) {
-            const filenameMatch = contentDisposition.match(/filename="?(.+)"?/);
-            if (filenameMatch && filenameMatch.length === 2)
-                filename = filenameMatch[1];
-        }
-        link.href = url;
-        link.setAttribute('download', filename);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
-        toast.success(`${fileType.replace('_', ' ')} downloaded successfully!`);
-    }).catch(error => {
-        console.error('Download error:', error);
-        toast.error('Failed to download file. You may not have permission or the file may not exist.');
-    });
+  const downloadFile = async (fileType) => {
+    try {
+      toast.info(`Preparing ${fileType} file for download...`);
+      
+      const token = localStorage.getItem('token');
+      const response = await apiClient.get(`/tracks/${id}/download/${fileType}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+        maxRedirects: 0,  // Don't follow redirects automatically
+        validateStatus: (status) => status === 307 || status === 200  // Accept redirect status
+      });
+      
+      // Backend returns 307 redirect with signed URL in Location header
+      if (response.status === 307) {
+        const signedUrl = response.headers.location || response.data;
+        // Open signed URL in new tab to trigger download
+        window.open(signedUrl, '_blank');
+        toast.success(`Download started for ${fileType.replace('_', ' ')}`);
+      }
+    } catch (error) {
+      console.error('Download error:', error);
+      toast.error('Failed to download file. You may not have permission or the file may not exist.');
+    }
   };
 
   const formatDate = (dateString) => {
