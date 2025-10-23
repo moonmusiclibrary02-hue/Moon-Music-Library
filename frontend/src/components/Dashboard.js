@@ -272,7 +272,7 @@ const Dashboard = ({ apiClient }) => {
 
   const playTrack = async (track) => {
     try {
-      if (!track.mp3_file_path) {
+      if (!track.mp3_blob_name) {
         toast.error('No audio file available for this track');
         return;
       }
@@ -385,25 +385,31 @@ const Dashboard = ({ apiClient }) => {
 
   const viewAgreement = async (track, agreementType) => {
     try {
-      const fieldName = agreementType === 'singer' ? 'singer_agreement_file_path' : 'music_director_agreement_file_path';
+      // Use blob_name fields (new GCS workflow)
+      const blobFieldName = agreementType === 'singer' ? 'singer_agreement_blob_name' : 'music_director_agreement_blob_name';
       const filenameName = agreementType === 'singer' ? 'singer_agreement_filename' : 'music_director_agreement_filename';
       
-      if (!track[fieldName]) {
+      if (!track[blobFieldName]) {
         toast.error(`No ${agreementType} agreement available for this track`);
         return;
       }
 
-      const backendUrl = process.env.REACT_APP_BACKEND_URL || window.location.origin;
-      const fileUrl = `${backendUrl}/api/files/${track[filenameName]}`;
-      const fileName = track[filenameName] || 'agreement';
+      // Download the agreement file using the download endpoint
+      const downloadType = agreementType === 'singer' ? 'singer_agreement' : 'music_director_agreement';
+      const token = localStorage.getItem('token');
       
-      setAgreementModal({
-        isOpen: true,
-        track: track,
-        agreementType: agreementType,
-        fileUrl: fileUrl,
-        fileName: fileName
+      const response = await apiClient.get(`/tracks/${track.id}/download/${downloadType}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+        maxRedirects: 0,
+        validateStatus: (status) => status === 307 || status === 200
       });
+      
+      if (response.status === 307) {
+        const signedUrl = response.headers.location || response.data;
+        // Open agreement in new tab
+        window.open(signedUrl, '_blank');
+        toast.success(`Opening ${agreementType} agreement`);
+      }
       
     } catch (error) {
       console.error('Error viewing agreement:', error);
@@ -859,7 +865,7 @@ const Dashboard = ({ apiClient }) => {
                     </div>
 
                     {/* Audio Preview */}
-                    {track.mp3_file_path && (
+                    {track.mp3_blob_name && (
                       <div className="space-y-2">
                         <div className="flex items-center space-x-2 text-gray-400 text-sm">
                           <Play className="h-3 w-3" />
@@ -880,7 +886,7 @@ const Dashboard = ({ apiClient }) => {
 
                     {/* Action Buttons */}
                     <div className="flex flex-wrap gap-2">
-                      {track.mp3_file_path && (
+                      {track.mp3_blob_name && (
                         <Button
                           size="sm"
                           variant="outline"
@@ -932,13 +938,13 @@ const Dashboard = ({ apiClient }) => {
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => track.singer_agreement_file_path ? viewAgreement(track, 'singer') : null}
+                        onClick={() => track.singer_agreement_blob_name ? viewAgreement(track, 'singer') : null}
                         className={`flex-1 min-w-[90px] ${
-                          track.singer_agreement_file_path 
+                          track.singer_agreement_blob_name 
                             ? 'border-yellow-600 text-yellow-400 hover:text-yellow-300 hover:border-yellow-500'
                             : 'border-red-600 text-red-400 hover:text-red-300 hover:border-red-500'
-                        } ${!track.singer_agreement_file_path ? 'cursor-not-allowed opacity-75' : ''}`}
-                        title={track.singer_agreement_file_path ? 'View Singer Agreement' : 'No Singer Agreement'}
+                        } ${!track.singer_agreement_blob_name ? 'cursor-not-allowed opacity-75' : ''}`}
+                        title={track.singer_agreement_blob_name ? 'View Singer Agreement' : 'No Singer Agreement'}
                         data-testid={`view-singer-agreement-${track.id}`}
                       >
                         <Eye className="h-3 w-3 mr-1" />
@@ -949,13 +955,13 @@ const Dashboard = ({ apiClient }) => {
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => track.music_director_agreement_file_path ? viewAgreement(track, 'music_director') : null}
+                        onClick={() => track.music_director_agreement_blob_name ? viewAgreement(track, 'music_director') : null}
                         className={`flex-1 min-w-[90px] ${
-                          track.music_director_agreement_file_path 
+                          track.music_director_agreement_blob_name 
                             ? 'border-pink-600 text-pink-400 hover:text-pink-300 hover:border-pink-500'
                             : 'border-red-600 text-red-400 hover:text-red-300 hover:border-red-500'
-                        } ${!track.music_director_agreement_file_path ? 'cursor-not-allowed opacity-75' : ''}`}
-                        title={track.music_director_agreement_file_path ? 'View Music Director Agreement' : 'No Music Director Agreement'}
+                        } ${!track.music_director_agreement_blob_name ? 'cursor-not-allowed opacity-75' : ''}`}
+                        title={track.music_director_agreement_blob_name ? 'View Music Director Agreement' : 'No Music Director Agreement'}
                         data-testid={`view-director-agreement-${track.id}`}
                       >
                         <Eye className="h-3 w-3 mr-1" />
@@ -1073,7 +1079,7 @@ const Dashboard = ({ apiClient }) => {
                           </TableCell>
                           <TableCell>
                             <div className="flex space-x-1">
-                              {track.mp3_file_path && (
+                              {track.mp3_blob_name && (
                                 <Badge variant="secondary" className="bg-green-500/20 text-green-400 text-xs">
                                   MP3
                                 </Badge>
@@ -1088,12 +1094,12 @@ const Dashboard = ({ apiClient }) => {
                                   Session
                                 </Badge>
                               )}
-                              {track.singer_agreement_file_path && (
+                              {track.singer_agreement_blob_name && (
                                 <Badge variant="secondary" className="bg-yellow-500/20 text-yellow-400 text-xs">
                                   Singer Agr.
                                 </Badge>
                               )}
-                              {track.music_director_agreement_file_path && (
+                              {track.music_director_agreement_blob_name && (
                                 <Badge variant="secondary" className="bg-pink-500/20 text-pink-400 text-xs">
                                   Dir. Agr.
                                 </Badge>
@@ -1102,7 +1108,7 @@ const Dashboard = ({ apiClient }) => {
                           </TableCell>
                           <TableCell>
                             <div className="flex space-x-2">
-                              {track.mp3_file_path && (
+                              {track.mp3_blob_name && (
                                 <Button
                                   size="sm"
                                   variant="ghost"
@@ -1137,7 +1143,7 @@ const Dashboard = ({ apiClient }) => {
                                   <Eye className="h-4 w-4" />
                                 </Button>
                               </Link>
-                              {track.mp3_file_path && (
+                              {track.mp3_blob_name && (
                                 <Button
                                   size="sm"
                                   variant="ghost"
@@ -1154,13 +1160,13 @@ const Dashboard = ({ apiClient }) => {
                               <Button
                                 size="sm"
                                 variant="ghost"
-                                onClick={() => track.singer_agreement_file_path ? viewAgreement(track, 'singer') : null}
+                                onClick={() => track.singer_agreement_blob_name ? viewAgreement(track, 'singer') : null}
                                 className={`h-8 w-8 p-0 ${
-                                  track.singer_agreement_file_path 
+                                  track.singer_agreement_blob_name 
                                     ? 'text-yellow-400 hover:text-yellow-300'
                                     : 'text-red-400 hover:text-red-300 opacity-75 cursor-not-allowed'
                                 }`}
-                                title={track.singer_agreement_file_path ? 'View Singer Agreement' : 'No Singer Agreement'}
+                                title={track.singer_agreement_blob_name ? 'View Singer Agreement' : 'No Singer Agreement'}
                                 data-testid={`table-view-singer-agreement-${track.id}`}
                               >
                                 <FileText className="h-4 w-4" />
@@ -1170,13 +1176,13 @@ const Dashboard = ({ apiClient }) => {
                               <Button
                                 size="sm"
                                 variant="ghost"
-                                onClick={() => track.music_director_agreement_file_path ? viewAgreement(track, 'music_director') : null}
+                                onClick={() => track.music_director_agreement_blob_name ? viewAgreement(track, 'music_director') : null}
                                 className={`h-8 w-8 p-0 ${
-                                  track.music_director_agreement_file_path 
+                                  track.music_director_agreement_blob_name 
                                     ? 'text-pink-400 hover:text-pink-300'
                                     : 'text-red-400 hover:text-red-300 opacity-75 cursor-not-allowed'
                                 }`}
-                                title={track.music_director_agreement_file_path ? 'View Music Director Agreement' : 'No Music Director Agreement'}
+                                title={track.music_director_agreement_blob_name ? 'View Music Director Agreement' : 'No Music Director Agreement'}
                                 data-testid={`table-view-director-agreement-${track.id}`}
                               >
                                 <User className="h-4 w-4" />
