@@ -826,15 +826,18 @@ const playTrack = async (track) => {
                     <div className="flex flex-wrap gap-2">
                       {track.mp3_blob_name && (
                         <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => downloadFile(track.id, 'mp3', `${track.title}.mp3`)}
-                          className="flex-1 min-w-[70px] border-gray-600 text-gray-400 hover:text-white hover:border-gray-500"
-                          data-testid={`download-mp3-${track.id}`}
-                        >
-                          <Download className="h-3 w-3 mr-1" />
-                          MP3
-                        </Button>
+                        size="sm"
+                        variant="outline"
+                        // THE FIX: Call downloadFile, not viewAgreement
+                        onClick={() => downloadFile(track.id, 'singer_agreement')}
+                        disabled={!track.singer_agreement_blob_name}
+                        className="flex-1 min-w-[90px] border-yellow-600 text-yellow-400 hover:text-yellow-300 hover:border-yellow-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title={track.singer_agreement_blob_name ? 'Download Singer Agreement' : 'No Singer Agreement'}
+                      >
+                        {/* THE FIX: Use Download icon */}
+                        <Download className="h-3 w-3 mr-1" />
+                        Singer Agr.
+                      </Button>
                       )}
                       {track.lyrics_file_path && (
                         <>
@@ -876,13 +879,11 @@ const playTrack = async (track) => {
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => track.singer_agreement_blob_name ? viewAgreement(track, 'singer') : null}
-                        className={`flex-1 min-w-[90px] ${
-                          track.singer_agreement_blob_name 
-                            ? 'border-yellow-600 text-yellow-400 hover:text-yellow-300 hover:border-yellow-500'
-                            : 'border-red-600 text-red-400 hover:text-red-300 hover:border-red-500'
-                        } ${!track.singer_agreement_blob_name ? 'cursor-not-allowed opacity-75' : ''}`}
-                        title={track.singer_agreement_blob_name ? 'View Singer Agreement' : 'No Singer Agreement'}
+                        onClick={() => downloadFile(track.id, 'singer_agreement')}
+                        disabled={!track.singer_agreement_blob_name}
+                        className="flex-1 min-w-[90px] border-yellow-600 text-yellow-400 hover:text-yellow-300 hover:border-yellow-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title={track.singer_agreement_blob_name ? 'Download Singer Agreement' : 'No Singer Agreement'}
+                      
                         data-testid={`view-singer-agreement-${track.id}`}
                       >
                         <Eye className="h-3 w-3 mr-1" />
@@ -893,16 +894,14 @@ const playTrack = async (track) => {
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => track.music_director_agreement_blob_name ? viewAgreement(track, 'music_director') : null}
-                        className={`flex-1 min-w-[90px] ${
-                          track.music_director_agreement_blob_name 
-                            ? 'border-pink-600 text-pink-400 hover:text-pink-300 hover:border-pink-500'
-                            : 'border-red-600 text-red-400 hover:text-red-300 hover:border-red-500'
-                        } ${!track.music_director_agreement_blob_name ? 'cursor-not-allowed opacity-75' : ''}`}
-                        title={track.music_director_agreement_blob_name ? 'View Music Director Agreement' : 'No Music Director Agreement'}
-                        data-testid={`view-director-agreement-${track.id}`}
+                        // THE FIX: Call downloadFile, not viewAgreement
+                        onClick={() => downloadFile(track.id, 'music_director_agreement')}
+                        disabled={!track.music_director_agreement_blob_name}
+                        className="flex-1 min-w-[90px] border-pink-600 text-pink-400 hover:text-pink-300 hover:border-pink-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title={track.music_director_agreement_blob_name ? 'Download Music Director Agreement' : 'No Music Director Agreement'}
                       >
-                        <Eye className="h-3 w-3 mr-1" />
+                        {/* THE FIX: Use Download icon */}
+                        <Download className="h-3 w-3 mr-1" />
                         Dir. Agr.
                       </Button>
                     </div>

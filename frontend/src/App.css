@@ -199,3 +199,13 @@ audio::-webkit-media-controls-pause-button {
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
 }
+
+input:-webkit-autofill,
+input:-webkit-autofill:hover, 
+input:-webkit-autofill:focus, 
+input:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 30px #1a1a2e inset !important; /* A dark purple close to your theme */
+  -webkit-text-fill-color: #ffffff !important; /* Make the text white */
+  caret-color: white !important; /* Ensure the text cursor is visible */
+  transition: background-color 5000s ease-in-out 0s;
+}
