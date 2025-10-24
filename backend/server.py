@@ -1808,6 +1808,75 @@ async def download_bulk_upload_template(current_user: User = Depends(get_current
         logger.exception("Failed to generate or serve the bulk upload template.")
         raise HTTPException(status_code=500, detail="Could not generate the Excel template.")
 
+@api_router.post("/tracks/bulk-upload")
+async def bulk_upload_tracks(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Process bulk upload of tracks from an Excel file.
+    Downloads files from Google Drive links and uploads to GCS.
+    """
+    try:
+        # Validate file type
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            raise HTTPException(status_code=400, detail="Invalid file type. Please upload an Excel file (.xlsx or .xls)")
+        
+        # Read the Excel file
+        contents = await file.read()
+        df = pd.read_excel(BytesIO(contents))
+        
+        logger.info(f"Bulk upload started by user {current_user.id}. Processing {len(df)} rows.")
+        
+        # Track results
+        successful_tracks = []
+        failed_rows = []
+        
+        # Process each row
+        for index, row in df.iterrows():
+            row_number = index + 2  # +2 because Excel rows start at 1 and we have a header
+            
+            try:
+                track_id, error = await process_bulk_upload_row(row.to_dict(), row_number, current_user)
+                
+                if error:
+                    failed_rows.append({
+                        "row": row_number,
+                        "error": error,
+                        "title": row.get('Title', 'N/A')
+                    })
+                    logger.warning(f"Row {row_number} failed: {error}")
+                else:
+                    successful_tracks.append(track_id)
+                    logger.info(f"Row {row_number} processed successfully. Track ID: {track_id}")
+                    
+            except Exception as e:
+                failed_rows.append({
+                    "row": row_number,
+                    "error": str(e),
+                    "title": row.get('Title', 'N/A')
+                })
+                logger.error(f"Unexpected error processing row {row_number}: {e}")
+        
+        # Prepare response
+        response_data = {
+            "successful_count": len(successful_tracks),
+            "failed_count": len(failed_rows),
+            "successful_tracks": successful_tracks,
+            "errors": failed_rows
+        }
+        
+        logger.info(f"Bulk upload completed. Success: {len(successful_tracks)}, Failed: {len(failed_rows)}")
+        
+        return response_data
+        
+    except pd.errors.ParserError as e:
+        logger.error(f"Failed to parse Excel file: {e}")
+        raise HTTPException(status_code=400, detail="Invalid Excel file format. Please use the provided template.")
+    except Exception as e:
+        logger.exception("Unexpected error during bulk upload")
+        raise HTTPException(status_code=500, detail=f"Bulk upload failed: {str(e)}")
+
 @api_router.get("/tracks/{track_id}", response_model=MusicTrack) 
 async def get_track_details(track_id: str, current_user: User = Depends(get_current_user)):
     """
