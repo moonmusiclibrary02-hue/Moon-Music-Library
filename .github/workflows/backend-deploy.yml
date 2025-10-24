@@ -4,7 +4,7 @@ name: Deploy Backend to Cloud Run
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "development" ]
     paths:
       - 'backend/**'
       - '.github/workflows/backend-deploy.yml'
