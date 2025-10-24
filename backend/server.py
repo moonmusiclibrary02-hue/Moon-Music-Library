@@ -1779,7 +1779,36 @@ async def delete_track(track_id: str, current_user: User = Depends(get_current_u
     
     return {"message": "Track and associated files deleted successfully"}
 
-@api_router.get("/tracks/{track_id}", response_model=MusicTrack)
+@api_router.get("/tracks/bulk-upload-template")
+async def download_bulk_upload_template(current_user: User = Depends(get_current_user)):
+    """
+    Generates and serves the Excel template for bulk track uploads.
+    """
+    try:
+        # 1. Generate the Excel workbook in memory
+        workbook = generate_excel_template()
+
+        # 2. Save the workbook to a temporary memory buffer
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        buffer.seek(0)  # Rewind the buffer to the beginning to be read
+
+        # 3. Define the headers to tell the browser it's a file download
+        headers = {
+            'Content-Disposition': 'attachment; filename="bulk_upload_template.xlsx"'
+        }
+
+        # 4. Return the file as a response
+        return Response(
+            content=buffer.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers
+        )
+    except Exception as e:
+        logger.exception("Failed to generate or serve the bulk upload template.")
+        raise HTTPException(status_code=500, detail="Could not generate the Excel template.")
+
+@api_router.get("/tracks/{track_id}", response_model=MusicTrack) 
 async def get_track_details(track_id: str, current_user: User = Depends(get_current_user)):
     """
     Fetch the details for a single music track.
@@ -1855,34 +1884,7 @@ async def get_track_stream_url(track_id: str, current_user: User = Depends(get_c
             raise e
         raise HTTPException(status_code=500, detail="Could not process stream request.")
 
-@api_router.get("/tracks/bulk-upload-template")
-async def download_bulk_upload_template(current_user: User = Depends(get_current_user)):
-    """
-    Generates and serves the Excel template for bulk track uploads.
-    """
-    try:
-        # 1. Generate the Excel workbook in memory
-        workbook = generate_excel_template()
 
-        # 2. Save the workbook to a temporary memory buffer
-        buffer = io.BytesIO()
-        workbook.save(buffer)
-        buffer.seek(0)  # Rewind the buffer to the beginning to be read
-
-        # 3. Define the headers to tell the browser it's a file download
-        headers = {
-            'Content-Disposition': 'attachment; filename="bulk_upload_template.xlsx"'
-        }
-
-        # 4. Return the file as a response
-        return Response(
-            content=buffer.getvalue(),
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers=headers
-        )
-    except Exception as e:
-        logger.exception("Failed to generate or serve the bulk upload template.")
-        raise HTTPException(status_code=500, detail="Could not generate the Excel template.")
 
 @api_router.get("/tracks/next-code/{full_prefix}")
 async def get_next_unique_code(full_prefix: str, current_user: User = Depends(get_current_user)):
