@@ -69,50 +69,58 @@ const BulkUpload = ({ apiClient }) => {
 
   const handleBulkUpload = async () => {
     if (!selectedFile) {
-      toast.error('Please select an Excel file');
+      toast.error('Please select an Excel file to upload.');
       return;
     }
 
     setUploading(true);
     setUploadProgress(0);
+    // It's good practice to clear previous results when starting a new upload
+    setUploadResults(null); 
     
     try {
       const formData = new FormData();
       formData.append('file', selectedFile);
 
-      // Simulate progress updates
-      const progressInterval = setInterval(() => {
-        setUploadProgress(prev => {
-          if (prev >= 90) {
-            clearInterval(progressInterval);
-            return prev;
-          }
-          return prev + 10;
-        });
-      }, 500);
-
+      // --- THE FIX IS HERE: We use Axios's onUploadProgress for a REAL progress bar ---
       const response = await apiClient.post('/tracks/bulk-upload', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
+          // The Authorization header is now automatically added by your apiClient instance
+        },
+        // This function is called by axios periodically during the upload
+        onUploadProgress: (progressEvent) => {
+          const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          setUploadProgress(percentCompleted);
         },
       });
 
-      clearInterval(progressInterval);
-      setUploadProgress(100);
+      // After a successful upload, the response from the backend contains the results
       setUploadResults(response.data);
       
-      toast.success(`Bulk upload completed! ${response.data.successful_count} tracks uploaded successfully.`);
+      // Show a summary toast
+      if (response.data.failed_count > 0) {
+        toast.warning(`Bulk upload finished. ${response.data.successful_count} succeeded, ${response.data.failed_count} failed.`);
+      } else {
+        toast.success(`Bulk upload complete! All ${response.data.successful_count} tracks were uploaded successfully.`);
+      }
       
     } catch (error) {
       console.error('Error during bulk upload:', error);
-      const message = error.response?.data?.detail || 'Bulk upload failed';
+      // The apiClient interceptor will handle 401 errors (logout) automatically.
+      // This handles other errors, like server crashes or validation failures.
+      const message = error.response?.data?.detail || 'A server error occurred during bulk upload.';
       toast.error(message);
+      
+      // Provide a more detailed error structure for the UI
       setUploadResults({
         successful_count: 0,
-        failed_count: 1,
-        errors: [{ row: 1, error: message }]
+        failed_count: 1, // Represent the entire upload as one failure
+        errors: [{ row: 'N/A', error: message }]
       });
+      setUploadProgress(0); // Reset progress on failure
     } finally {
+      // This will run whether the upload succeeds or fails
       setUploading(false);
     }
   };
