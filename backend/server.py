@@ -634,22 +634,27 @@ async def generate_signed_url_with_impersonation(blob_name: str, expiration: tim
     """
     A robust, reusable helper to generate any signed URL using explicit service account impersonation.
     """
-    # (Your provided code for this function is perfect and goes here)
     if not SIGNING_SERVICE_ACCOUNT_EMAIL:
         logger.error("FATAL: SIGNING_SERVICE_ACCOUNT_EMAIL is not set.")
         raise HTTPException(status_code=500, detail="Server is critically misconfigured for signing URLs.")
+
     try:
+        # Step 1: Manually fetch the base credentials from the environment
         base_creds, project_id = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        
+        # Step 2: Manually create the impersonated credentials
         impersonated_creds = impersonated_credentials.Credentials(
             source_credentials=base_creds,
             target_principal=SIGNING_SERVICE_ACCOUNT_EMAIL,
             target_scopes=["https://www.googleapis.com/auth/devstorage.read_write"],
             lifetime=int(expiration.total_seconds())
         )
+        
+        # Step 3: Use the explicit credentials to generate the URL
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(blob_name)
         
-        # Using kwargs is a clean way to handle optional parameters
+        # This is the correctly indented block
         kwargs = {
             "version": "v4",
             "expiration": expiration,
@@ -663,8 +668,9 @@ async def generate_signed_url_with_impersonation(blob_name: str, expiration: tim
 
         url = await asyncio.to_thread(blob.generate_signed_url, **kwargs)
         return url
+        
     except Exception as e:
-        logger.exception("CRITICAL ERROR during explicit signed URL generation in helper.")
+        logger.exception("CRITICAL ERROR during explicit signed URL generation in helper function.")
         raise HTTPException(status_code=500, detail=f"Failed to generate URL: {type(e).__name__}")
 
 async def upload_to_gcs(file: UploadFile, folder: str) -> str:
