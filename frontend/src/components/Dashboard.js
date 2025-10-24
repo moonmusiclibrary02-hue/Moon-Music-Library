@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import AudioPlayer from './AudioPlayer';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
@@ -398,22 +399,19 @@ const playTrack = async (track) => {
     }
   };
 
-  const downloadFile = async (trackId, fileType, title) => {
-      // Note: The 'filename' parameter is now just 'title' for creating a fallback
-      toast.info(`Preparing ${fileType} file for download...`);
+    const downloadFile = async (trackId, fileType) => {
+      toast.info(`Preparing ${fileType.replace('_', ' ')} download...`);
       try {
-        // 1. Ask our backend for the secure, temporary URL
+        // 1. Ask our backend for the secure URL
         const response = await apiClient.get(`/tracks/${trackId}/download/${fileType}`);
         const { url } = response.data;
 
-        // 2. Open the secure URL directly. The browser will handle the download
-        // because the backend set the 'Content-Disposition' header.
+        // 2. Open the URL in a new tab. The browser will handle the download.
         window.open(url, '_blank');
-
-        toast.success(`${fileType.replace('_', ' ')} download started!`);
+        
       } catch (error) {
         console.error('Download error:', error);
-        toast.error('Failed to get download link. You may not have permission.');
+        toast.error('Failed to get download link.');
       }
     };
 
@@ -820,16 +818,7 @@ const playTrack = async (track) => {
                           <Play className="h-3 w-3" />
                           <span>Audio Preview</span>
                         </div>
-                        <audio 
-                          controls 
-                          className="w-full h-8" 
-                          preload="metadata"
-                          data-testid={`audio-preview-${track.id}`}
-                          
-                        >
-                          <source src={`${process.env.REACT_APP_BACKEND_URL}/api/files/${track.mp3_filename}`} type="audio/mpeg" />
-                          Your browser does not support the audio element.
-                        </audio>
+                        <AudioPlayer track={track} apiClient={apiClient} />
                       </div>
                     )}
 

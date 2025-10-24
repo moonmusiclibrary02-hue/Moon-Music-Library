@@ -4,6 +4,7 @@ import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Textarea } from './ui/textarea';
+import AudioPlayer from './AudioPlayer';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from './ui/dialog';
@@ -109,29 +110,18 @@ const TrackDetails = ({ apiClient }) => {
     }
   };
   
-  const downloadFile = async (fileType) => {
-    try {
-      toast.info(`Preparing ${fileType} file for download...`);
-      
-      const token = localStorage.getItem('token');
-      const response = await apiClient.get(`/tracks/${id}/download/${fileType}`, {
-        headers: { 'Authorization': `Bearer ${token}` },
-        maxRedirects: 0,  // Don't follow redirects automatically
-        validateStatus: (status) => status === 307 || status === 200  // Accept redirect status
-      });
-      
-      // Backend returns 307 redirect with signed URL in Location header
-      if (response.status === 307) {
-        const signedUrl = response.headers.location || response.data;
-        // Open signed URL in new tab to trigger download
-        window.open(signedUrl, '_blank');
-        toast.success(`Download started for ${fileType.replace('_', ' ')}`);
+    const downloadFile = async (fileType) => {
+      // The track 'id' is available from the useParams hook
+      toast.info(`Preparing ${fileType.replace('_', ' ')} download...`);
+      try {
+        const response = await apiClient.get(`/tracks/${id}/download/${fileType}`);
+        const { url } = response.data;
+        window.open(url, '_blank');
+      } catch (error) {
+        console.error('Download error:', error);
+        toast.error('Failed to get download link.');
       }
-    } catch (error) {
-      console.error('Download error:', error);
-      toast.error('Failed to download file. You may not have permission or the file may not exist.');
-    }
-  };
+    };
 
   const formatDate = (dateString) => {
     if (!dateString) return 'Not specified';
@@ -316,17 +306,7 @@ const TrackDetails = ({ apiClient }) => {
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
-                <audio
-                  ref={audioRef}
-                  controls
-                  className="w-full"
-                  preload="metadata"
-                  crossOrigin="anonymous"
-                  src={audioUrl}
-                  key={audioUrl}
-                >
-                  Your browser does not support the audio element.
-                </audio>
+                <AudioPlayer track={track} apiClient={apiClient} />
                 <MusicVisualizer audioRef={audioRef} />
               </CardContent>
             </Card>
