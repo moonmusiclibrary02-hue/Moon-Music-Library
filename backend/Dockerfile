@@ -19,5 +19,5 @@ ENV PORT 8080
 # This command starts your server.
 # **ASSUMPTION:** This command needs to be correct for your Python framework (e.g., gunicorn for production)
 # Replace 'gunicorn --bind :$PORT server:app' with the actual command to run your server.py.
-CMD exec uvicorn server:app --host 0.0.0.0 --port ${PORT:-8000}
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080"]
 # A more robust production command might be: CMD ["gunicorn", "--bind", "0.0.0.0:$PORT", "server:app"]

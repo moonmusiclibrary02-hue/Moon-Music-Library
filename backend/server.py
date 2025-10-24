@@ -636,7 +636,8 @@ async def generate_signed_url_with_impersonation(blob_name: str, expiration: tim
     """
     # (Your provided code for this function is perfect and goes here)
     if not SIGNING_SERVICE_ACCOUNT_EMAIL:
-        # ... error handling ...
+        logger.error("FATAL: SIGNING_SERVICE_ACCOUNT_EMAIL is not set.")
+        raise HTTPException(status_code=500, detail="Server is critically misconfigured for signing URLs.")
     try:
         base_creds, project_id = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
         impersonated_creds = impersonated_credentials.Credentials(
