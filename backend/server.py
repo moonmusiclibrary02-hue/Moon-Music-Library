@@ -1798,55 +1798,63 @@ async def get_track_details(track_id: str, current_user: User = Depends(get_curr
 @api_router.get("/tracks/{track_id}/download/{file_type}", response_model=dict)
 async def get_track_download_url(track_id: str, file_type: str, current_user: User = Depends(get_current_user)):
     """Generates and returns a download URL by calling the robust helper function."""
-    track = await db.tracks.find_one({"id": track_id})
-    if not track: raise HTTPException(status_code=404, detail="Track not found")
+    try:
+        track = await db.tracks.find_one({"id": track_id})
+        if not track: raise HTTPException(status_code=404, detail="Track not found")
 
-    # ... (Authorization logic is unchanged)
-    if current_user.user_type == "manager" and track.get("created_by") != current_user.id and track.get("managed_by") != current_user.manager_id:
-        raise HTTPException(status_code=403, detail="Not authorized")
+        if current_user.user_type == "manager" and track.get("created_by") != current_user.id and track.get("managed_by") != current_user.manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
 
-    blob_field_map = { "mp3": "mp3_blob_name", "lyrics": "lyrics_blob_name", "session": "session_blob_name", "singer_agreement": "singer_agreement_blob_name", "music_director_agreement": "music_director_agreement_blob_name" }
-    blob_field = blob_field_map.get(file_type)
-    if not blob_field or not track.get(blob_field):
-        raise HTTPException(status_code=404, detail=f"File of type '{file_type}' not found.")
+        blob_field_map = { "mp3": "mp3_blob_name", "lyrics": "lyrics_blob_name", "session": "session_blob_name", "singer_agreement": "singer_agreement_blob_name", "music_director_agreement": "music_director_agreement_blob_name" }
+        blob_field = blob_field_map.get(file_type)
+        if not blob_field or not track.get(blob_field):
+            raise HTTPException(status_code=404, detail=f"File of type '{file_type}' not found.")
 
-    blob_name = track[blob_field]
-    original_filename = track.get(f"{file_type}_filename") or blob_name.split('/')[-1]
-    
-    # THE FIX: Call our new helper function
-    url = await generate_signed_url_with_impersonation(
-        blob_name=blob_name,
-        expiration=timedelta(minutes=15),
-        method="GET",
-        response_disposition=f'attachment; filename="{original_filename}"'
-    )
-    return {"url": url}
+        blob_name = track[blob_field]
+        original_filename = track.get(f"{file_type}_filename") or blob_name.split('/')[-1]
+        
+        url = await generate_signed_url_with_impersonation(
+            blob_name=blob_name,
+            expiration=timedelta(minutes=15),
+            method="GET",
+            response_disposition=f'attachment; filename="{original_filename}"'
+        )
+        return {"url": url}
+    except Exception as e:
+        logger.exception(f"Failed to get download URL for track {track_id}")
+        # Re-raise HTTPException if it's already one, otherwise wrap it
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail="Could not process download request.")
 
 
 @api_router.get("/tracks/{track_id}/stream", response_model=dict)
 async def get_track_stream_url(track_id: str, current_user: User = Depends(get_current_user)):
     """Generates and returns a stream URL by calling the robust helper function."""
-    track = await db.tracks.find_one({"id": track_id})
-    if not track: raise HTTPException(status_code=404, detail="Track not found")
-    
-    # ... (Authorization logic is unchanged)
-    if current_user.user_type == "manager" and track.get("created_by") != current_user.id and track.get("managed_by") != current_user.manager_id:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    try:
+        track = await db.tracks.find_one({"id": track_id})
+        if not track: raise HTTPException(status_code=404, detail="Track not found")
+        
+        if current_user.user_type == "manager" and track.get("created_by") != current_user.id and track.get("managed_by") != current_user.manager_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
 
-    blob_name = track.get("mp3_blob_name")
-    if not blob_name:
-        raise HTTPException(status_code=404, detail="Audio file not found.")
-    
-    # THE FIX: Call our new helper function
-    url = await generate_signed_url_with_impersonation(
-        blob_name=blob_name,
-        expiration=timedelta(hours=2),
-        method="GET"
-    )
-    return {"url": url}
+        blob_name = track.get("mp3_blob_name")
+        if not blob_name:
+            raise HTTPException(status_code=404, detail="Audio file not found.")
+        
+        url = await generate_signed_url_with_impersonation(
+            blob_name=blob_name,
+            expiration=timedelta(hours=2),
+            method="GET"
+        )
+        return {"url": url}
     except Exception as e:
-        logger.exception(f"Failed to generate stream URL for blob: {blob_name}")
-        raise HTTPException(status_code=500, detail="Could not generate audio stream link.")
+        logger.exception(f"Failed to get stream URL for track {track_id}")
+        # Re-raise HTTPException if it's already one, otherwise wrap it
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail="Could not process stream request.")
+
 
 
 @api_router.get("/tracks/next-code/{full_prefix}")
