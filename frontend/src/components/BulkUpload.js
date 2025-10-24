@@ -43,7 +43,7 @@ const BulkUpload = ({ apiClient }) => {
   const downloadTemplate = async () => {
     try {
       console.log('Starting template download...');
-      const response = await apiClient.get('/tracks/bulk-upload/template', {
+      const response = await apiClient.get('/tracks/bulk-upload-template', {
         responseType: 'blob'
       });
       
