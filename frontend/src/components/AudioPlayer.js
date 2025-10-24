@@ -1,59 +1,70 @@
-import React, { useState, useRef } from 'react';
+// src/components/AudioPlayer.js
+
+import React, { useState, useRef, useEffect } from 'react';
 import { toast } from 'sonner';
+import { Button } from './ui/button'; // Assuming you have this component
+import { Play } from 'lucide-react'; // For the icon
 
 const AudioPlayer = ({ track, apiClient }) => {
-  // We only need one state variable now: the source URL.
   const [audioSrc, setAudioSrc] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
   const audioRef = useRef(null);
 
-  // This function will be called ONLY when the user clicks the play button
-  // on an audio element that doesn't have a source yet.
-  const handlePlay = async () => {
-    // If we already have the URL, the browser will handle playing. Do nothing.
-    if (audioSrc) {
-      return;
-    }
+  const loadAndPlayAudio = async () => {
+    if (isLoading || audioSrc) return;
 
-    // If there's no source, fetch the secure URL from our backend.
+    setIsLoading(true);
     toast.info(`Loading audio for ${track.title}...`);
     try {
+      // 1. Fetch the secure, temporary URL from the backend.
       const response = await apiClient.get(`/tracks/${track.id}/stream`);
-      const secureUrl = response.data.url;
       
-      // THE FIX:
-      // 1. Set the secure URL in our state. This will update the <audio> tag's src.
-      setAudioSrc(secureUrl);
-      
-      // 2. We need to manually load and play the audio AFTER the src is set.
-      // We use a small timeout to give React a moment to update the DOM.
-      setTimeout(() => {
-        if (audioRef.current) {
-          audioRef.current.load(); // Tell the audio element to load the new source
-          audioRef.current.play(); // Now, play it
-        }
-      }, 50); // A 50ms delay is more than enough
+      // 2. Set the URL in our state. This will cause the component to re-render.
+      setAudioSrc(response.data.url);
 
     } catch (error) {
       console.error("Error fetching audio stream URL:", error);
       toast.error("Could not load audio. You may not have permission.");
+      setIsLoading(false); // Reset loading state on error
     }
   };
 
-  return (
-    <div className="w-full">
-      <audio
-        ref={audioRef}
-        controls
-        // The src is now managed by our state. It starts as null.
-        src={audioSrc || ''}
-        // onPlay will only fire the FIRST time the user clicks play.
-        onPlay={handlePlay}
-        preload="metadata"
-        className="w-full h-8"
+  // This useEffect will run ONLY when audioSrc changes from null to a real URL.
+  useEffect(() => {
+    if (audioSrc && audioRef.current) {
+      // The audio element is now in the DOM with the correct src.
+      // We can now safely tell it to play.
+      audioRef.current.play();
+    }
+  }, [audioSrc]);
+
+  // If we haven't fetched the URL yet, show a "Load Audio" button.
+  if (!audioSrc) {
+    return (
+      <Button
+        variant="outline"
+        className="w-full border-orange-500 text-orange-400 hover:bg-orange-500/10 hover:text-orange-300"
+        onClick={loadAndPlayAudio}
+        disabled={isLoading}
       >
-        Your browser does not support the audio element.
-      </audio>
-    </div>
+        <Play className="h-4 w-4 mr-2" />
+        {isLoading ? 'Loading...' : 'Preview Audio'}
+      </Button>
+    );
+  }
+
+  // Once we have the URL, render the actual audio player.
+  return (
+    <audio
+      ref={audioRef}
+      controls
+      autoPlay // This will make it play automatically once the src is set
+      src={audioSrc}
+      preload="auto"
+      className="w-full h-8"
+    >
+      Your browser does not support the audio element.
+    </audio>
   );
 };
 
