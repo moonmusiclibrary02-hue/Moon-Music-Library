@@ -270,94 +270,55 @@ const Dashboard = ({ apiClient }) => {
     }
   };
 
-  const playTrack = async (track) => {
+const playTrack = async (track) => {
     try {
       if (!track.mp3_blob_name) {
         toast.error('No audio file available for this track');
         return;
       }
 
-      // If same track is playing, toggle pause/play
       if (audioPlayer.currentTrack?.id === track.id && audioPlayer.audio) {
         if (audioPlayer.isPlaying) {
           audioPlayer.audio.pause();
           setAudioPlayer(prev => ({ ...prev, isPlaying: false }));
         } else {
-          audioPlayer.audio.play();
+          await audioPlayer.audio.play();
           setAudioPlayer(prev => ({ ...prev, isPlaying: true }));
         }
         return;
       }
 
-      // Stop current track if different track is selected
       if (audioPlayer.audio) {
         audioPlayer.audio.pause();
         audioPlayer.audio = null;
       }
 
-      // Create new audio element
-      const backendUrl = process.env.REACT_APP_BACKEND_URL || window.location.origin;
-      const audioUrl = `${backendUrl}/api/files/${track.mp3_filename}`;
-      console.log('Attempting to play audio from:', audioUrl);
+      toast.info(`Loading: ${track.title}`);
       
-      const audio = new Audio();
-      audio.crossOrigin = "anonymous"; // Handle CORS
-      audio.preload = "metadata";
+      // --- THE FIX IS HERE ---
+      // 1. Ask our backend for the secure, temporary stream URL
+      const response = await apiClient.get(`/tracks/${track.id}/stream`);
+      const { url: audioUrl } = response.data;
       
-      // Set up event listeners
-      audio.addEventListener('loadstart', () => {
-        console.log('Audio loading started for:', track.title);
-        toast.info(`Loading: ${track.title}`);
-      });
+      // 2. Create the audio element with the new URL
+      const audio = new Audio(audioUrl);
+      audio.crossOrigin = "anonymous";
       
-      audio.addEventListener('canplay', () => {
-        console.log('Audio can play:', track.title);
-      });
+      audio.onended = () => setAudioPlayer({ currentTrack: null, isPlaying: false, audio: null });
+      audio.onerror = () => toast.error('Failed to load audio file.');
       
-      audio.addEventListener('loadeddata', () => {
-        console.log('Audio loaded successfully');
-      });
-      
-      audio.addEventListener('ended', () => {
-        setAudioPlayer(prev => ({ 
-          ...prev, 
-          isPlaying: false,
-          currentTrack: null,
-          audio: null
-        }));
-        toast.success(`Finished playing: ${track.title}`);
-      });
-      
-      audio.addEventListener('error', (e) => {
-        console.error('Audio error:', e, 'for URL:', audioUrl);
-        const errorMsg = audio.error ? 
-          `Audio error (${audio.error.code}): ${audio.error.message || 'Unknown error'}` : 
-          'Failed to load audio file';
-        toast.error(errorMsg);
-        setAudioPlayer(prev => ({ 
-          ...prev, 
-          isPlaying: false,
-          currentTrack: null,
-          audio: null
-        }));
-      });
-      
-      // Set the audio source
-      audio.src = audioUrl;
-
-      // Start playing
       await audio.play();
+
       setAudioPlayer({
         currentTrack: track,
         isPlaying: true,
         audio: audio
       });
-      
       toast.success(`Now playing: ${track.title}`);
       
     } catch (error) {
       console.error('Error playing track:', error);
-      toast.error('Failed to play track');
+      toast.error('Failed to get audio stream URL.');
     }
   };
 
@@ -384,38 +345,29 @@ const Dashboard = ({ apiClient }) => {
   }, [audioPlayer.audio]);
 
   const viewAgreement = async (track, agreementType) => {
-    try {
-      // Use blob_name fields (new GCS workflow)
-      const blobFieldName = agreementType === 'singer' ? 'singer_agreement_blob_name' : 'music_director_agreement_blob_name';
-      const filenameName = agreementType === 'singer' ? 'singer_agreement_filename' : 'music_director_agreement_filename';
-      
-      if (!track[blobFieldName]) {
-        toast.error(`No ${agreementType} agreement available for this track`);
-        return;
-      }
+      try {
+        const blobFieldName = agreementType === 'singer' ? 'singer_agreement_blob_name' : 'music_director_agreement_blob_name';
+        if (!track[blobFieldName]) {
+          toast.error(`No ${agreementType} agreement available.`);
+          return;
+        }
 
-      // Download the agreement file using the download endpoint
-      const downloadType = agreementType === 'singer' ? 'singer_agreement' : 'music_director_agreement';
-      const token = localStorage.getItem('token');
-      
-      const response = await apiClient.get(`/tracks/${track.id}/download/${downloadType}`, {
-        headers: { 'Authorization': `Bearer ${token}` },
-        maxRedirects: 0,
-        validateStatus: (status) => status === 307 || status === 200
-      });
-      
-      if (response.status === 307) {
-        const signedUrl = response.headers.location || response.data;
-        // Open agreement in new tab
-        window.open(signedUrl, '_blank');
-        toast.success(`Opening ${agreementType} agreement`);
+        const downloadType = agreementType === 'singer' ? 'singer_agreement' : 'music_director_agreement';
+
+        // --- THE FIX IS HERE ---
+        // 1. Ask our backend for the secure, temporary URL
+        const response = await apiClient.get(`/tracks/${track.id}/download/${downloadType}`);
+        const { url } = response.data;
+
+        // 2. Open the URL in a new tab for viewing
+        window.open(url, '_blank');
+        toast.success(`Opening ${agreementType.replace('_', ' ')} agreement`);
+
+      } catch (error) {
+        console.error('Error viewing agreement:', error);
+        toast.error('Failed to load agreement.');
       }
-      
-    } catch (error) {
-      console.error('Error viewing agreement:', error);
-      toast.error('Failed to load agreement');
-    }
-  };
+    };
 
   const closeAgreementModal = () => {
     setAgreementModal({
@@ -446,27 +398,24 @@ const Dashboard = ({ apiClient }) => {
     }
   };
 
-  const downloadFile = async (trackId, fileType, filename) => {
-    try {
-      const response = await apiClient.get(`/tracks/${trackId}/download/${fileType}`, {
-        responseType: 'blob'
-      });
-      
-      const url = window.URL.createObjectURL(new Blob([response.data]));
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
-      
-      toast.success(`${fileType === 'mp3' ? 'Audio' : fileType === 'session' ? 'Session' : 'Lyrics'} file downloaded successfully`);
-    } catch (error) {
-      console.error('Download error:', error);
-      toast.error('Failed to download file');
-    }
-  };
+  const downloadFile = async (trackId, fileType, title) => {
+      // Note: The 'filename' parameter is now just 'title' for creating a fallback
+      toast.info(`Preparing ${fileType} file for download...`);
+      try {
+        // 1. Ask our backend for the secure, temporary URL
+        const response = await apiClient.get(`/tracks/${trackId}/download/${fileType}`);
+        const { url } = response.data;
+
+        // 2. Open the secure URL directly. The browser will handle the download
+        // because the backend set the 'Content-Disposition' header.
+        window.open(url, '_blank');
+
+        toast.success(`${fileType.replace('_', ' ')} download started!`);
+      } catch (error) {
+        console.error('Download error:', error);
+        toast.error('Failed to get download link. You may not have permission.');
+      }
+    };
 
   const viewLyrics = async (track) => {
     setLyricsModal({
@@ -876,7 +825,7 @@ const Dashboard = ({ apiClient }) => {
                           className="w-full h-8" 
                           preload="metadata"
                           data-testid={`audio-preview-${track.id}`}
-                          src={`${process.env.REACT_APP_BACKEND_URL}/api/files/${track.mp3_filename}`}
+                          
                         >
                           <source src={`${process.env.REACT_APP_BACKEND_URL}/api/files/${track.mp3_filename}`} type="audio/mpeg" />
                           Your browser does not support the audio element.
