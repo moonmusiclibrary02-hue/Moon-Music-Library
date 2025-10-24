@@ -1808,7 +1808,7 @@ async def download_bulk_upload_template(current_user: User = Depends(get_current
         logger.exception("Failed to generate or serve the bulk upload template.")
         raise HTTPException(status_code=500, detail="Could not generate the Excel template.")
 
-@api_router.get("/tracks/{track_id}", response_model=MusicTrack)
+@api_router.get("/tracks/{track_id}", response_model=MusicTrack) 
 async def get_track_details(track_id: str, current_user: User = Depends(get_current_user)):
     """
     Fetch the details for a single music track.
