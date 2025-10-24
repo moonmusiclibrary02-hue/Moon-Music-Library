@@ -1,34 +1,36 @@
-// src/apiClient.js or wherever your apiClient is configured
+// src/apiClient.js
 
 import axios from 'axios';
 
+// 1. Define the base URL for your backend API
+const API_BASE_URL = process.env.REACT_APP_BACKEND_URL ? `${process.env.REACT_APP_BACKEND_URL}/api` : 'https://music-backend-service-175236630501.us-central1.run.app/api';
+
+// 2. Create the single, central axios instance
 const apiClient = axios.create({
-  baseURL: process.env.REACT_APP_BACKEND_URL || 'YOUR_BACKEND_URL_HERE' // Make sure this is set
+  baseURL: API_BASE_URL,
 });
 
-// --- THIS IS THE CRITICAL ADDITION ---
-// Add a response interceptor
+// 3. Add the interceptor to handle 401 errors (session expired)
 apiClient.interceptors.response.use(
   (response) => {
-    // Any status code that lie within the range of 2xx cause this function to trigger
+    // If the request was successful, just return the response
     return response;
   },
   (error) => {
-    // Any status codes that falls outside the range of 2xx cause this function to trigger
+    // If the server responded with an error
     if (error.response && error.response.status === 401) {
-      console.error("Authentication Error (401): Token is invalid or expired. Logging out.");
+      // And the error is specifically a 401 Unauthorized
+      console.error("SESSION EXPIRED (401). Forcing logout.");
       
-      // Remove the expired token
+      // Remove the bad token and redirect to the login page
       localStorage.removeItem('token');
-      
-      // Redirect to the login page
-      // We use window.location.href to force a full page reload, clearing all state.
       window.location.href = '/login';
     }
     
-    // Return a rejected promise to allow individual ".catch()" blocks to handle other errors
+    // For all other errors, let the component's .catch() handle it
     return Promise.reject(error);
   }
 );
 
+// 4. Export the single, configured instance for the rest of your app to use
 export default apiClient;

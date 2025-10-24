@@ -17,80 +17,72 @@ import './App.css';
 // const BACKEND_URL = window.BACKEND_URL || 'http://localhost:8000';
 // const API = `${BACKEND_URL}/api`;
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+// const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 // Create axios instance with interceptor for auth
-const apiClient = axios.create({
-  baseURL: API,
-});
+// const apiClient = axios.create({
+//   baseURL: API,
+// });
 
 // --- THIS IS THE NEW PART THAT YOU NEED TO ADD ---
 // It "intercepts" all responses from the server.
-apiClient.interceptors.response.use(
-  (response) => {
-    // If the response is successful (e.g., status 200), just return it.
-    return response;
-  },
-  (error) => {
-    // If the server responds with an error...
-    if (error.response && error.response.status === 401) {
-      // ...and the error is specifically a 401 Unauthorized...
-      console.error("SESSION EXPIRED (401). Forcing logout.");
+// apiClient.interceptors.response.use(
+//   (response) => {
+//     // If the response is successful (e.g., status 200), just return it.
+//     return response;
+//   },
+//   (error) => {
+//     // If the server responds with an error...
+//     if (error.response && error.response.status === 401) {
+//       // ...and the error is specifically a 401 Unauthorized...
+//       console.error("SESSION EXPIRED (401). Forcing logout.");
       
-      // ...then remove the bad token and redirect to the login page.
-      localStorage.removeItem('token');
-      window.location.href = '/login';
-    }
+//       // ...then remove the bad token and redirect to the login page.
+//       localStorage.removeItem('token');
+//       window.location.href = '/login';
+//     }
     
-    // For all other errors, just let the component's .catch() handle it.
-    return Promise.reject(error);
-  }
-);
-// --- END OF THE NEW PART ---
+//     // For all other errors, just let the component's .catch() handle it.
+//     return Promise.reject(error);
+//   }
+// );
+// // --- END OF THE NEW PART ---
 
 function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  // Setup axios interceptor
+  // THIS IS NOW THE ONLY useEffect FOR AUTHENTICATION
   useEffect(() => {
+    // 1. Get the token from storage
     const token = localStorage.getItem('token');
+    
     if (token) {
+      // 2. Set the token on the apiClient for all future requests in this session
       apiClient.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-    }
 
-    // Response interceptor for handling auth errors
-    apiClient.interceptors.response.use(
-      (response) => response,
-      (error) => {
-        if (error.response?.status === 401 || error.response?.status === 403) {
-          localStorage.removeItem('token');
-          setUser(null);
-          toast.error('Session expired. Please log in again.');
-        }
-        return Promise.reject(error);
-      }
-    );
-  }, []);
-
-  // Check authentication on app load
-  useEffect(() => {
-    const checkAuth = async () => {
-      const token = localStorage.getItem('token');
-      if (token) {
-        try {
-          const response = await apiClient.get('/auth/me');
+      // 3. Check if the token is valid by fetching the user profile
+      apiClient.get('/auth/me')
+        .then(response => {
+          // If successful, set the user in our app state
           setUser(response.data);
-        } catch (error) {
-          localStorage.removeItem('token');
-          console.error('Auth check failed:', error);
-        }
-      }
+        })
+        .catch(error => {
+          // If this fails (e.g., a 401 error), the interceptor in apiClient.js will
+          // automatically handle the logout and redirect. We just log it here.
+          console.error("Auth check failed on app load:", error.message);
+          setUser(null);
+        })
+        .finally(() => {
+          // 4. No matter what, stop the loading spinner
+          setLoading(false);
+        });
+    } else {
+      // If there's no token at all, we know the user is not logged in.
       setLoading(false);
-    };
+    }
+  }, []); // The empty array ensures this runs only ONCE when the app first loads.
 
-    checkAuth();
-  }, []);
 
   const login = async (email, password) => {
     try {
