@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import axios from 'axios';
+// import axios from 'axios';
+import apiClient from './apiClient';
 import { Toaster } from './components/ui/sonner';
 import { toast } from 'sonner';
 import AuthPage from './components/AuthPage';
@@ -22,6 +23,30 @@ const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const apiClient = axios.create({
   baseURL: API,
 });
+
+// --- THIS IS THE NEW PART THAT YOU NEED TO ADD ---
+// It "intercepts" all responses from the server.
+apiClient.interceptors.response.use(
+  (response) => {
+    // If the response is successful (e.g., status 200), just return it.
+    return response;
+  },
+  (error) => {
+    // If the server responds with an error...
+    if (error.response && error.response.status === 401) {
+      // ...and the error is specifically a 401 Unauthorized...
+      console.error("SESSION EXPIRED (401). Forcing logout.");
+      
+      // ...then remove the bad token and redirect to the login page.
+      localStorage.removeItem('token');
+      window.location.href = '/login';
+    }
+    
+    // For all other errors, just let the component's .catch() handle it.
+    return Promise.reject(error);
+  }
+);
+// --- END OF THE NEW PART ---
 
 function App() {
   const [user, setUser] = useState(null);
