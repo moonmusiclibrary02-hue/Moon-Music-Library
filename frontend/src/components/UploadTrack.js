@@ -176,14 +176,17 @@ const UploadTrack = ({ apiClient }) => {
           return;
         }
 
-        // Fetch current user details
-        const userResponse = await apiClient.get('/auth/me', {
+        // Fetch current user profile (includes manager_details)
+        const profileResponse = await apiClient.get('/profile', {
           headers: {
             'Authorization': `Bearer ${token}`
           }
         });
-        const user = userResponse.data;
-        setCurrentUser(user);
+        const profile = profileResponse.data;
+        console.log('Profile data:', profile);
+        console.log('User type:', profile.user_type);
+        console.log('Manager details:', profile.manager_details);
+        setCurrentUser(profile);
 
         // Define all available languages
         const allLanguages = [
@@ -192,16 +195,13 @@ const UploadTrack = ({ apiClient }) => {
         ];
 
         // If user is a manager, only show their assigned languages
-        if (user.user_type === 'manager' && user.manager_id) {
-          const managerResponse = await apiClient.get(`/managers/${user.manager_id}`, {
-            headers: {
-              'Authorization': `Bearer ${token}`
-            }
-          });
-          const assignedLanguages = managerResponse.data.assigned_language || [];
+        if (profile.user_type === 'manager' && profile.manager_details?.assigned_language) {
+          const assignedLanguages = profile.manager_details.assigned_language;
+          console.log('Assigned languages:', assignedLanguages);
           setAvailableLanguages(assignedLanguages);
         } else {
           // Admin users can see all languages
+          console.log('Using all languages (admin or no manager_details)');
           setAvailableLanguages(allLanguages);
         }
       } catch (error) {
