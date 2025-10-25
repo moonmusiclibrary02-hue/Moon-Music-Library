@@ -673,9 +673,19 @@ async def generate_signed_url_with_impersonation(blob_name: str, expiration: tim
         logger.exception("CRITICAL ERROR during explicit signed URL generation in helper function.")
         raise HTTPException(status_code=500, detail=f"Failed to generate URL: {type(e).__name__}")
 
-async def upload_to_gcs(file: UploadFile, folder: str) -> str:
+async def upload_to_gcs(file_path: str, original_filename: str, folder: str, content_type: str = None) -> str:
     """
-    Uploads a file to a specified folder in the GCS bucket and returns its blob name.
+    Uploads a file from disk to a specified folder in the GCS bucket using streaming.
+    This memory-efficient approach reads directly from disk without loading the entire file into memory.
+    
+    Args:
+        file_path: Path to the file on the server's disk
+        original_filename: Original name of the file (used for generating blob name)
+        folder: Target folder in GCS bucket (e.g., 'audio', 'lyrics', 'sessions', 'agreements')
+        content_type: Optional MIME type for the file
+    
+    Returns:
+        The blob name (path) in GCS
     """
     if not GCS_BUCKET_NAME:
         raise HTTPException(status_code=500, detail="GCS bucket name is not configured.")
@@ -685,24 +695,59 @@ async def upload_to_gcs(file: UploadFile, folder: str) -> str:
         
         # Create a unique filename using a UUID to prevent collisions.
         # Format: audio/123e4567-e89b-12d3-a456-426614174000_my-song.mp3
-        blob_name = f"{folder}/{uuid.uuid4()}_{file.filename}"
+        blob_name = f"{folder}/{uuid.uuid4()}_{original_filename}"
         blob = bucket.blob(blob_name)
         
-        # Stream the file directly to GCS using upload_from_file
-        # This avoids loading the entire file into memory
-        await asyncio.to_thread(
-            blob.upload_from_file,
-            file.file,
-            content_type=file.content_type,
-            rewind=True
-        )
+        # Set content type if provided
+        if content_type:
+            blob.content_type = content_type
         
-        logger.info(f"Successfully uploaded {file.filename} to gs://{GCS_BUCKET_NAME}/{blob_name}")
+        # Upload directly from file on disk using asyncio.to_thread for the blocking operation
+        # This streams the file without loading it entirely into memory
+        await asyncio.to_thread(blob.upload_from_filename, file_path)
+        
+        logger.info(f"Successfully uploaded {original_filename} to gs://{GCS_BUCKET_NAME}/{blob_name} (streamed from disk)")
     except Exception as e:
-        logger.exception(f"Failed to upload {file.filename} to GCS")
+        logger.exception(f"Failed to upload {original_filename} to GCS")
         raise HTTPException(status_code=500, detail=f"Could not upload file: {e}") from e
     
     return blob_name
+
+async def upload_file_to_gcs(file: UploadFile, folder: str) -> str:
+    """
+    Helper function to upload an UploadFile object to GCS using the streaming approach.
+    This saves the file to a temporary location on disk first, then streams it to GCS.
+    
+    Args:
+        file: FastAPI UploadFile object
+        folder: Target folder in GCS bucket
+    
+    Returns:
+        The blob name (path) in GCS
+    """
+    temp_file_path = None
+    try:
+        # Create a temporary file on disk
+        temp_filename = f"{uuid.uuid4()}_{file.filename}"
+        temp_file_path = f"/tmp/{temp_filename}"
+        
+        # Save UploadFile to disk
+        async with aiofiles.open(temp_file_path, 'wb') as f:
+            content = await file.read()
+            await f.write(content)
+        
+        # Upload to GCS from disk (memory-efficient)
+        blob_name = await upload_to_gcs(temp_file_path, file.filename, folder, file.content_type)
+        
+        return blob_name
+    finally:
+        # Always clean up temporary file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+                logger.debug(f"Cleaned up temporary upload file: {temp_file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary upload file {temp_file_path}: {e}")
 
 async def generate_signed_url(blob_name: str, expiration_minutes: int = 60) -> str:
     """
@@ -886,41 +931,44 @@ async def process_bulk_upload_row(row_data, row_number, current_user):
         file_names = {}
         
         google_drive_fields = {
-            'Audio File Google Drive Link': ('mp3_blob_name', 'mp3_filename', '.mp3', 'audio'),
-            'Lyrics File Google Drive Link': ('lyrics_blob_name', 'lyrics_filename', '.txt', 'lyrics'),
-            'Session File Google Drive Link': ('session_blob_name', 'session_filename', '.zip', 'sessions'),
-            'Singer Agreement Google Drive Link': ('singer_agreement_blob_name', 'singer_agreement_filename', '.pdf', 'agreements'),
-            'Music Director Agreement Google Drive Link': ('music_director_agreement_blob_name', 'music_director_agreement_filename', '.pdf', 'agreements')
+            'Audio File Google Drive Link': ('mp3_blob_name', 'mp3_filename', '.mp3', 'audio', 'audio/mpeg'),
+            'Lyrics File Google Drive Link': ('lyrics_blob_name', 'lyrics_filename', '.txt', 'lyrics', 'text/plain'),
+            'Session File Google Drive Link': ('session_blob_name', 'session_filename', '.zip', 'sessions', 'application/zip'),
+            'Singer Agreement Google Drive Link': ('singer_agreement_blob_name', 'singer_agreement_filename', '.pdf', 'agreements', 'application/pdf'),
+            'Music Director Agreement Google Drive Link': ('music_director_agreement_blob_name', 'music_director_agreement_filename', '.pdf', 'agreements', 'application/pdf')
         }
         
-        for field_name, (blob_key, filename_key, extension, folder) in google_drive_fields.items():
+        for field_name, (blob_key, filename_key, extension, folder, content_type) in google_drive_fields.items():
             google_drive_url = str(row_data.get(field_name, '')).strip()
             if google_drive_url and google_drive_url.lower() != 'nan':
+                temp_file_path = None
                 try:
+                    # Generate temporary filename
                     temp_filename = f"{uuid.uuid4()}{extension}"
+                    
+                    # Download from Google Drive to disk
                     temp_file_path = await download_from_google_drive(google_drive_url, temp_filename)
                     
-                    # Upload to GCS from the temporary file
-                    async with aiofiles.open(temp_file_path, 'rb') as f:
-                        content = await f.read()
-                        file = UploadFile(
-                            filename=temp_filename,
-                            file=BytesIO(content),
-                            content_type=mimetypes.guess_type(temp_filename)[0] or 'application/octet-stream'
-                        )
-                        blob_name = await upload_to_gcs(file, folder)
+                    # Upload to GCS directly from disk (memory-efficient streaming)
+                    blob_name = await upload_to_gcs(temp_file_path, temp_filename, folder, content_type)
                     
                     # Store the blob name and original filename
                     blob_names[blob_key] = blob_name
                     file_names[filename_key] = temp_filename
                     
-                    # Clean up temporary file
-                    try:
-                        os.remove(temp_file_path)
-                    except:
-                        pass
+                    logger.info(f"Successfully processed {field_name} for row {row_number}")
+                    
                 except Exception as e:
+                    logger.error(f"Error processing {field_name} for row {row_number}: {e}")
                     return None, f"Error processing {field_name}: {str(e)}"
+                finally:
+                    # Always clean up temporary file from disk, even if upload fails
+                    if temp_file_path and os.path.exists(temp_file_path):
+                        try:
+                            os.remove(temp_file_path)
+                            logger.debug(f"Cleaned up temporary file: {temp_file_path}")
+                        except Exception as cleanup_error:
+                            logger.warning(f"Failed to clean up temporary file {temp_file_path}: {cleanup_error}")
         
         # Set managed_by for managers
         managed_by = None
@@ -1612,32 +1660,32 @@ async def create_track(
     
     # MP3 Audio
     if mp3_file:
-        # Legacy: Upload file directly
-        mp3_blob_name = await upload_to_gcs(mp3_file, "audio")
+        # Legacy: Upload file directly (now using memory-efficient streaming)
+        mp3_blob_name = await upload_file_to_gcs(mp3_file, "audio")
         mp3_filename = mp3_file.filename
     # else: use mp3_blob_name and mp3_filename from Form parameters (already set)
     
     # Lyrics
     if lyrics_file:
-        lyrics_blob_name = await upload_to_gcs(lyrics_file, "lyrics")
+        lyrics_blob_name = await upload_file_to_gcs(lyrics_file, "lyrics")
         lyrics_filename = lyrics_file.filename
     # else: use lyrics_blob_name and lyrics_filename from Form parameters
         
     # Session
     if session_file:
-        session_blob_name = await upload_to_gcs(session_file, "sessions")
+        session_blob_name = await upload_file_to_gcs(session_file, "sessions")
         session_filename = session_file.filename
     # else: use session_blob_name and session_filename from Form parameters
         
     # Singer Agreement
     if singer_agreement_file:
-        singer_agreement_blob_name = await upload_to_gcs(singer_agreement_file, "agreements")
+        singer_agreement_blob_name = await upload_file_to_gcs(singer_agreement_file, "agreements")
         singer_agreement_filename = singer_agreement_file.filename
     # else: use singer_agreement_blob_name and singer_agreement_filename from Form parameters
         
     # Music Director Agreement
     if music_director_agreement_file:
-        music_director_agreement_blob_name = await upload_to_gcs(music_director_agreement_file, "agreements")
+        music_director_agreement_blob_name = await upload_file_to_gcs(music_director_agreement_file, "agreements")
         music_director_agreement_filename = music_director_agreement_file.filename
     # else: use music_director_agreement_blob_name and music_director_agreement_filename from Form parameters
     
