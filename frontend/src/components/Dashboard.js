@@ -410,14 +410,51 @@ const playTrack = async (track) => {
   };
 
   const deleteManager = async (managerId) => {
-    if (window.confirm('Are you sure you want to delete this manager?')) {
-      try {
-        await apiClient.delete(`/managers/${managerId}`);
-        toast.success('Manager deleted successfully!');
-        fetchManagers();
-      } catch (error) {
-        console.error('Error deleting manager:', error);
-        toast.error('Failed to delete manager');
+    try {
+      // Find the manager to show their name in confirmation
+      const manager = managers.find(m => m.id === managerId);
+      const managerName = manager ? manager.name : 'this manager';
+      
+      const confirmed = window.confirm(
+        `Are you sure you want to delete ${managerName}?\n\n` +
+        `This will:\n` +
+        `- Remove the manager from the system\n` +
+        `- Delete their user account\n` +
+        `- This action cannot be undone`
+      );
+      
+      if (!confirmed) {
+        return;
+      }
+
+      toast.info('Deleting manager...');
+      
+      const response = await apiClient.delete(`/managers/${managerId}`);
+      
+      toast.success(response.data.message || 'Manager deleted successfully!');
+      
+      // Refresh the managers list
+      await fetchManagers();
+      
+    } catch (error) {
+      console.error('Error deleting manager:', error);
+      
+      if (error.response) {
+        // Server responded with error
+        const errorMsg = error.response.data?.detail || error.response.data?.message || 'Failed to delete manager';
+        toast.error(errorMsg);
+        
+        if (error.response.status === 403) {
+          toast.error('You do not have permission to delete managers');
+        } else if (error.response.status === 404) {
+          toast.error('Manager not found');
+        }
+      } else if (error.request) {
+        // Request made but no response
+        toast.error('No response from server. Please check your connection.');
+      } else {
+        // Something else happened
+        toast.error('Failed to delete manager: ' + error.message);
       }
     }
   };
