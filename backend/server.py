@@ -1818,7 +1818,7 @@ async def get_tracks(
     - Admins see all tracks and can use all filters.
     """
     
-    # --- MANAGER-SPECIFIC LOGIC (This part is perfect) ---
+    # --- MANAGER-SPECIFIC LOGIC ---
     if current_user.user_type == "manager":
         if not current_user.manager_id:
             logger.warning(f"Manager user {current_user.id} has no manager_id. Returning empty list.")
@@ -1836,7 +1836,32 @@ async def get_tracks(
             logger.info(f"Manager {current_user.id} has no assigned languages. Returning empty list.")
             return []
         
-        query = {"audio_language": {"$in": manager_languages}}
+        # Build query filters for managers (language restriction + optional filters)
+        query_filters = [{"audio_language": {"$in": manager_languages}}]
+        
+        if search:
+            query_filters.append({
+                "$or": [
+                    {"unique_code": {"$regex": search, "$options": "i"}},
+                    {"title": {"$regex": search, "$options": "i"}},
+                    {"music_composer": {"$regex": search, "$options": "i"}},
+                    {"singer_name": {"$regex": search, "$options": "i"}},
+                    {"album_name": {"$regex": search, "$options": "i"}}
+                ]
+            })
+        
+        if composer:
+            query_filters.append({"music_composer": {"$regex": composer, "$options": "i"}})
+        if singer:
+            query_filters.append({"singer_name": {"$regex": singer, "$options": "i"}})
+        if album:
+            query_filters.append({"album_name": {"$regex": album, "$options": "i"}})
+        if language:
+            query_filters.append({"audio_language": {"$regex": language, "$options": "i"}})
+        if rights_type in ["original", "multi_rights"]:
+            query_filters.append({"rights_type": rights_type})
+        
+        query = {"$and": query_filters}
         
         tracks = await db.tracks.find(query).to_list(1000)
         return [MusicTrack(**parse_from_mongo(track)) for track in tracks]
