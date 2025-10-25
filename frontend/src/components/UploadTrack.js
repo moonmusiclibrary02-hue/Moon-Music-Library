@@ -62,6 +62,8 @@ const UploadTrack = ({ apiClient }) => {
   const navigate = useNavigate();
   const { toast } = useToast();
   const [loading, setLoading] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [availableLanguages, setAvailableLanguages] = useState([]);
   const [formData, setFormData] = useState({
     rights_type: '',
     track_category: '',
@@ -164,6 +166,56 @@ const UploadTrack = ({ apiClient }) => {
     const timer = setTimeout(() => retryPendingCleanups(), 2000);
     return () => clearTimeout(timer);
   }, [cleanupBlobs]);
+
+  // Fetch current user and set available languages
+  useEffect(() => {
+    const fetchUserAndLanguages = async () => {
+      try {
+        const token = localStorage.getItem('token');
+        if (!token) {
+          return;
+        }
+
+        // Fetch current user details
+        const userResponse = await apiClient.get('/auth/me', {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+        const user = userResponse.data;
+        setCurrentUser(user);
+
+        // Define all available languages
+        const allLanguages = [
+          'English', 'Telugu', 'Kannada', 'Tamil', 'Hindi', 
+          'Malayalam', 'Bengali', 'Sanskrit', 'Punjabi', 'Bhojpuri', 'Urdu'
+        ];
+
+        // If user is a manager, only show their assigned languages
+        if (user.user_type === 'manager' && user.manager_id) {
+          const managerResponse = await apiClient.get(`/managers/${user.manager_id}`, {
+            headers: {
+              'Authorization': `Bearer ${token}`
+            }
+          });
+          const assignedLanguages = managerResponse.data.assigned_language || [];
+          setAvailableLanguages(assignedLanguages);
+        } else {
+          // Admin users can see all languages
+          setAvailableLanguages(allLanguages);
+        }
+      } catch (error) {
+        console.error('Error fetching user or languages:', error);
+        // On error, show all languages as fallback
+        setAvailableLanguages([
+          'English', 'Telugu', 'Kannada', 'Tamil', 'Hindi', 
+          'Malayalam', 'Bengali', 'Sanskrit', 'Punjabi', 'Bhojpuri', 'Urdu'
+        ]);
+      }
+    };
+
+    fetchUserAndLanguages();
+  }, [apiClient]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -667,84 +719,45 @@ const handleSubmit = async (event) => {
                     <SelectValue placeholder="Select audio language" />
                   </SelectTrigger>
                   <SelectContent className="bg-gray-800 border-gray-600">
-                    <SelectItem value="English" className="text-white hover:bg-gray-700">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-blue-400">🌍</span>
-                        <span>English</span>
-                      </div>
-                    </SelectItem>
-                    
-                    <SelectItem value="Telugu" className="text-white hover:bg-gray-700">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-yellow-400">🎭</span>
-                        <span>Telugu</span>
-                      </div>
-                    </SelectItem>
-                    
-                    <SelectItem value="Kannada" className="text-white hover:bg-gray-700">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-purple-400">🎨</span>
-                        <span>Kannada</span>
-                      </div>
-                    </SelectItem>
-                    
-                    <SelectItem value="Tamil" className="text-white hover:bg-gray-700">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-red-400">🎪</span>
-                        <span>Tamil</span>
-                      </div>
-                    </SelectItem>
-                    
-                    <SelectItem value="Hindi" className="text-white hover:bg-gray-700">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-orange-400">🇮🇳</span>
-                        <span>Hindi</span>
-                      </div>
-                    </SelectItem>
-                    
-                    <SelectItem value="Malayalam" className="text-white hover:bg-gray-700">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-emerald-400">🌴</span>
-                        <span>Malayalam</span>
-                      </div>
-                    </SelectItem>
-                    
-                    <SelectItem value="Bengali" className="text-white hover:bg-gray-700">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-pink-400">🎵</span>
-                        <span>Bengali</span>
-                      </div>
-                    </SelectItem>
-                    
-                    <SelectItem value="Sanskrit" className="text-white hover:bg-gray-700">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-yellow-300">📿</span>
-                        <span>Sanskrit</span>
-                      </div>
-                    </SelectItem>
-                    
-                    <SelectItem value="Punjabi" className="text-white hover:bg-gray-700">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-amber-400">🎺</span>
-                        <span>Punjabi</span>
-                      </div>
-                    </SelectItem>
-                    
-                    <SelectItem value="Bhojpuri" className="text-white hover:bg-gray-700">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-green-300">🎶</span>
-                        <span>Bhojpuri</span>
-                      </div>
-                    </SelectItem>
-                    
-                    <SelectItem value="Urdu" className="text-white hover:bg-gray-700">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-green-400">📖</span>
-                        <span>Urdu</span>
-                      </div>
-                    </SelectItem>
+                    {availableLanguages.map((language) => {
+                      // Define language icons and colors
+                      const languageConfig = {
+                        'English': { icon: '🌍', color: 'text-blue-400' },
+                        'Telugu': { icon: '🎭', color: 'text-yellow-400' },
+                        'Kannada': { icon: '🎨', color: 'text-purple-400' },
+                        'Tamil': { icon: '🎪', color: 'text-red-400' },
+                        'Hindi': { icon: '🇮🇳', color: 'text-orange-400' },
+                        'Malayalam': { icon: '🌴', color: 'text-emerald-400' },
+                        'Bengali': { icon: '🎵', color: 'text-pink-400' },
+                        'Sanskrit': { icon: '📿', color: 'text-yellow-300' },
+                        'Punjabi': { icon: '🎺', color: 'text-amber-400' },
+                        'Bhojpuri': { icon: '🎶', color: 'text-green-300' },
+                        'Urdu': { icon: '📖', color: 'text-green-400' }
+                      };
+                      
+                      const config = languageConfig[language] || { icon: '🌐', color: 'text-gray-400' };
+                      
+                      return (
+                        <SelectItem key={language} value={language} className="text-white hover:bg-gray-700">
+                          <div className="flex items-center space-x-2">
+                            <span className={config.color}>{config.icon}</span>
+                            <span>{language}</span>
+                          </div>
+                        </SelectItem>
+                      );
+                    })}
+                    {availableLanguages.length === 0 && (
+                      <SelectItem value="loading" disabled className="text-gray-500">
+                        Loading languages...
+                      </SelectItem>
+                    )}
                   </SelectContent>
                 </Select>
+                {currentUser?.user_type === 'manager' && availableLanguages.length > 0 && (
+                  <p className="text-xs text-gray-400 mt-1">
+                    You can upload tracks in: {availableLanguages.join(', ')}
+                  </p>
+                )}
               </div>
             </div>
 
