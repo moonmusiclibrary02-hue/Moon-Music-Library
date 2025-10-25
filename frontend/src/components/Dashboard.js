@@ -11,6 +11,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from './ui/dialog';
 import { ScrollArea } from './ui/scroll-area';
+import { Checkbox } from './ui/checkbox';
 import { toast } from 'sonner';
 import { Search, Music, Plus, Play, Pause, Download, Eye, Clock, User, Mic, Album, Grid, List, Filter, FileText, X, Users, Mail, Phone, Globe, Edit, Key, Trash2 } from 'lucide-react';
 
@@ -55,7 +56,7 @@ const Dashboard = ({ apiClient }) => {
   const [managerForm, setManagerForm] = useState({
     name: '',
     email: '',
-    assigned_language: '',
+    assigned_language: [],  // Changed to array for multi-select
     phone: '',
     custom_password: ''
   });
@@ -190,21 +191,21 @@ const Dashboard = ({ apiClient }) => {
         name: manager.name,
         email: manager.email,
         assigned_language: Array.isArray(manager.assigned_language) 
-          ? manager.assigned_language[0] || '' 
-          : manager.assigned_language,
+          ? manager.assigned_language 
+          : [manager.assigned_language],  // Ensure it's always an array
         phone: manager.phone || '',
         custom_password: ''  // Don't prefill password for editing
       });
       setManagerModal({ isOpen: true, editing: true, manager });
     } else {
-      setManagerForm({ name: '', email: '', assigned_language: '', phone: '', custom_password: '' });
+      setManagerForm({ name: '', email: '', assigned_language: [], phone: '', custom_password: '' });
       setManagerModal({ isOpen: true, editing: false, manager: null });
     }
   };
 
   const closeManagerModal = () => {
     setManagerModal({ isOpen: false, editing: false, manager: null });
-    setManagerForm({ name: '', email: '', assigned_language: '', phone: '', custom_password: '' });
+    setManagerForm({ name: '', email: '', assigned_language: [], phone: '', custom_password: '' });
   };
 
   const handleManagerSubmit = async (e) => {
@@ -217,12 +218,16 @@ const Dashboard = ({ apiClient }) => {
         return;
       }
       
-      // Convert assigned_language to array format for backend
+      // Validate that at least one language is selected
+      if (!managerForm.assigned_language || managerForm.assigned_language.length === 0) {
+        toast.error('Please select at least one language');
+        return;
+      }
+      
+      // assigned_language is already an array, send as-is
       const managerPayload = {
         ...managerForm,
-        assigned_language: Array.isArray(managerForm.assigned_language) 
-          ? managerForm.assigned_language 
-          : [managerForm.assigned_language]
+        assigned_language: managerForm.assigned_language
       };
       
       if (managerModal.editing) {
@@ -1528,28 +1533,53 @@ const playTrack = async (track) => {
               </div>
               
               <div className="space-y-2">
-                <Label htmlFor="manager-language" className="text-gray-300">Assigned Language *</Label>
-                <Select
-                  value={managerForm.assigned_language}
-                  onValueChange={(value) => setManagerForm({ ...managerForm, assigned_language: value })}
-                >
-                  <SelectTrigger className="bg-gray-800/50 border-gray-600 text-white" data-testid="manager-language-select">
-                    <SelectValue placeholder="Select language" />
-                  </SelectTrigger>
-                  <SelectContent className="bg-gray-800 border-gray-600">
-                    <SelectItem value="English">🌍 English</SelectItem>
-                    <SelectItem value="Telugu">🎭 Telugu</SelectItem>
-                    <SelectItem value="Kannada">🎨 Kannada</SelectItem>
-                    <SelectItem value="Tamil">🎪 Tamil</SelectItem>
-                    <SelectItem value="Hindi">🇮🇳 Hindi</SelectItem>
-                    <SelectItem value="Malayalam">🌴 Malayalam</SelectItem>
-                    <SelectItem value="Bengali">🎵 Bengali</SelectItem>
-                    <SelectItem value="Sanskrit">📿 Sanskrit</SelectItem>
-                    <SelectItem value="Punjabi">🎺 Punjabi</SelectItem>
-                    <SelectItem value="Bhojpuri">🎶 Bhojpuri</SelectItem>
-                    <SelectItem value="Urdu">📖 Urdu</SelectItem>
-                  </SelectContent>
-                </Select>
+                <Label htmlFor="manager-language" className="text-gray-300">Assigned Languages *</Label>
+                <div className="bg-gray-800/50 border border-gray-600 rounded-lg p-4 space-y-3 max-h-64 overflow-y-auto">
+                  {[
+                    { value: 'English', icon: '🌍' },
+                    { value: 'Telugu', icon: '🎭' },
+                    { value: 'Kannada', icon: '🎨' },
+                    { value: 'Tamil', icon: '🎪' },
+                    { value: 'Hindi', icon: '🇮🇳' },
+                    { value: 'Malayalam', icon: '🌴' },
+                    { value: 'Bengali', icon: '🎵' },
+                    { value: 'Sanskrit', icon: '📿' },
+                    { value: 'Punjabi', icon: '🎺' },
+                    { value: 'Bhojpuri', icon: '🎶' },
+                    { value: 'Urdu', icon: '📖' }
+                  ].map((lang) => (
+                    <div key={lang.value} className="flex items-center space-x-3 hover:bg-gray-700/30 p-2 rounded">
+                      <Checkbox
+                        id={`lang-${lang.value}`}
+                        checked={managerForm.assigned_language.includes(lang.value)}
+                        onCheckedChange={(checked) => {
+                          if (checked) {
+                            setManagerForm({
+                              ...managerForm,
+                              assigned_language: [...managerForm.assigned_language, lang.value]
+                            });
+                          } else {
+                            setManagerForm({
+                              ...managerForm,
+                              assigned_language: managerForm.assigned_language.filter(l => l !== lang.value)
+                            });
+                          }
+                        }}
+                        className="border-gray-500 data-[state=checked]:bg-blue-600 data-[state=checked]:border-blue-600"
+                      />
+                      <Label 
+                        htmlFor={`lang-${lang.value}`} 
+                        className="text-white cursor-pointer flex items-center space-x-2 flex-1"
+                      >
+                        <span>{lang.icon}</span>
+                        <span>{lang.value}</span>
+                      </Label>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-gray-400 mt-2">
+                  Select one or more languages this manager will handle
+                </p>
               </div>
               
               {!managerModal.editing && (
