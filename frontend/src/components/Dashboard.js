@@ -81,36 +81,52 @@ const Dashboard = ({ apiClient }) => {
   };
 
   const fetchTracks = async () => {
-      try {
-        setLoading(true);
-        const params = new URLSearchParams();
+    try {
+      setLoading(true);
+      const params = new URLSearchParams();
 
-        // ... your params logic is correct ...
-
-        const response = await apiClient.get(`/tracks?${params.toString()}`);
-
-        // --- THE FIX IS HERE ---
-        // Check if the response data is an object and has a key containing the array
-        // Common keys are 'items', 'tracks', or 'data'. Adjust if needed.
-        if (response.data && Array.isArray(response.data.items)) {
-          setTracks(response.data.items);
-        } else if (Array.isArray(response.data)) {
-          // Fallback in case the API sometimes returns a direct array
-          setTracks(response.data);
-        } else {
-          // If the structure is unexpected, default to an empty array to prevent crashes
-          console.warn("Unexpected data structure from /tracks endpoint:", response.data);
-          setTracks([]);
-        }
-
-      } catch (error) {
-        console.error('Error fetching tracks:', error);
-        toast.error('Failed to load tracks');
-        setTracks([]); // Also ensure tracks is an array on error
-      } finally {
-        setLoading(false);
+      // Add search term if present
+      if (searchTerm && searchTerm.trim()) {
+        params.append('search', searchTerm.trim());
       }
-    };
+
+      // Add filter parameters if they have values
+      if (filters.composer && filters.composer.trim()) {
+        params.append('composer', filters.composer.trim());
+      }
+      if (filters.singer && filters.singer.trim()) {
+        params.append('singer', filters.singer.trim());
+      }
+      if (filters.album && filters.album.trim()) {
+        params.append('album', filters.album.trim());
+      }
+      if (filters.language && filters.language.trim()) {
+        params.append('language', filters.language.trim());
+      }
+      if (filters.rights_type && filters.rights_type.trim()) {
+        params.append('rights_type', filters.rights_type.trim());
+      }
+
+      const response = await apiClient.get(`/tracks?${params.toString()}`);
+
+      // Handle response data
+      if (response.data && Array.isArray(response.data.items)) {
+        setTracks(response.data.items);
+      } else if (Array.isArray(response.data)) {
+        setTracks(response.data);
+      } else {
+        console.warn("Unexpected data structure from /tracks endpoint:", response.data);
+        setTracks([]);
+      }
+
+    } catch (error) {
+      console.error('Error fetching tracks:', error);
+      toast.error('Failed to load tracks');
+      setTracks([]);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleSearch = () => {
     fetchTracks();
@@ -118,7 +134,7 @@ const Dashboard = ({ apiClient }) => {
 
   const clearFilters = () => {
     setSearchTerm('');
-    setFilters({ composer: '', singer: '', album: '', language: '' });
+    setFilters({ composer: '', singer: '', album: '', language: '', rights_type: '' });
     setTimeout(() => fetchTracks(), 100);
   };
 
@@ -278,6 +294,7 @@ const playTrack = async (track) => {
         return;
       }
 
+      // If clicking the same track, toggle play/pause
       if (audioPlayer.currentTrack?.id === track.id && audioPlayer.audio) {
         if (audioPlayer.isPlaying) {
           audioPlayer.audio.pause();
@@ -289,19 +306,20 @@ const playTrack = async (track) => {
         return;
       }
 
+      // If switching to a different track, stop the current audio first
       if (audioPlayer.audio) {
         audioPlayer.audio.pause();
+        audioPlayer.audio.currentTime = 0; // Reset to beginning
         audioPlayer.audio = null;
       }
 
       toast.info(`Loading: ${track.title}`);
       
-      // --- THE FIX IS HERE ---
-      // 1. Ask our backend for the secure, temporary stream URL
+      // Get the secure stream URL from backend
       const response = await apiClient.get(`/tracks/${track.id}/stream`);
       const { url: audioUrl } = response.data;
       
-      // 2. Create the audio element with the new URL
+      // Create the audio element with the new URL
       const audio = new Audio(audioUrl);
       audio.crossOrigin = "anonymous";
       
@@ -632,6 +650,24 @@ const playTrack = async (track) => {
                     {language}
                   </SelectItem>
                 ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Rights Type Filter */}
+          <div>
+            <Label className="text-gray-400 mb-2 block">Rights Type</Label>
+            <Select
+              value={filters.rights_type || 'all'}
+              onValueChange={(value) => setFilters({ ...filters, rights_type: value === 'all' ? '' : value })}
+            >
+              <SelectTrigger className="bg-gray-800/50 border-gray-600 text-white" data-testid="rights-type-filter">
+                <SelectValue placeholder="Filter by rights type" />
+              </SelectTrigger>
+              <SelectContent className="bg-gray-800 border-gray-600">
+                <SelectItem value="all">All Rights Types</SelectItem>
+                <SelectItem value="original" className="text-white">Original</SelectItem>
+                <SelectItem value="multi_rights" className="text-white">Multi Rights</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -1350,8 +1386,8 @@ const playTrack = async (track) => {
         </DialogContent>
       </Dialog>
 
-      {/* Add Track FAB */}
-      <Link to="/upload" className="fixed bottom-6 right-6 z-50">
+      {/* Add Track FAB - Hidden in table view */}
+      <Link to="/upload" className={`fixed bottom-6 right-6 z-50 ${activeTab === 'table' ? 'hidden' : 'block'}`}>
         <Button 
           size="lg" 
           className="bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 text-white rounded-full p-4 shadow-2xl hover-glow"
