@@ -71,6 +71,11 @@ const Dashboard = ({ apiClient }) => {
     }
   }, [mainTab]);
 
+  // Auto-trigger search when filters change
+  useEffect(() => {
+    fetchTracks();
+  }, [filters.composer, filters.singer, filters.album, filters.language, filters.rights_type]);
+
   const fetchCurrentUser = async () => {
     try {
       const response = await apiClient.get('/auth/me');
