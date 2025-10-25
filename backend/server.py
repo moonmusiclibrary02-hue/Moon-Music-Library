@@ -1791,53 +1791,68 @@ async def get_tracks(
 ):
     """
     Retrieve tracks based on user role and filters.
-    - Managers: See only tracks in their assigned languages
-    - Admins: See all tracks
-    """
-    query = {}
     
-    # Role-based filtering: Managers can only see tracks in their assigned languages
+    Manager Logic:
+    - Only see tracks in their assigned languages
+    - All search/filter parameters are ignored for security
+    - Early return with language-based filtering only
+    
+    Admin Logic:
+    - See all tracks with full search/filter capabilities
+    - Can use search, composer, singer, album, language, and rights_type filters
+    """
+    
+    # ============================================================================
+    # MANAGER LOGIC: Complete isolation with early return
+    # ============================================================================
     if current_user.user_type == "manager":
-        # Defensive check: Fetch the manager's record
+        # Step 1: Fetch the manager's record
         manager_record = await db.managers.find_one({"id": current_user.manager_id})
         
-        # Early return if manager record doesn't exist
+        # Step 2: Defensive check - no record found
         if not manager_record:
-            logger.warning(f"Manager record not found for user_id={current_user.id}, manager_id={current_user.manager_id}")
-            return []  # No valid manager profile = no access to tracks
+            logger.warning(
+                f"Manager record not found for user_id={current_user.id}, "
+                f"manager_id={current_user.manager_id}"
+            )
+            return []  # No valid manager profile = no access
         
-        # Get assigned languages with defensive check
+        # Step 3: Get assigned languages
         manager_languages = manager_record.get("assigned_language", [])
         
-        # Early return if no languages assigned
+        # Step 4: Defensive check - no languages assigned
         if not manager_languages:
             logger.info(f"Manager {current_user.manager_id} has no assigned languages")
-            return []  # No languages = no access to tracks
+            return []  # No languages = no access
         
-        # Valid manager with languages: filter tracks by assigned languages
-        query["audio_language"] = {"$in": manager_languages}
-        logger.debug(f"Manager {current_user.manager_id} filtering tracks by languages: {manager_languages}")
+        # Step 5: Build language-only query
+        query = {"audio_language": {"$in": manager_languages}}
+        logger.debug(
+            f"Manager {current_user.manager_id} filtering tracks by languages: "
+            f"{manager_languages}"
+        )
+        
+        # Step 6: Execute query and return immediately (ignore all other filters)
+        tracks = await db.tracks.find(query).to_list(1000)
+        return [MusicTrack(**parse_from_mongo(track)) for track in tracks]
     
-    # Admins can see all tracks (no additional filter)
+    # ============================================================================
+    # ADMIN LOGIC: Full filtering capabilities
+    # ============================================================================
+    # If we reach here, user must be an admin
+    query = {}
     
-    # Apply search filter if provided
+    # Apply search filter across multiple fields
     if search:
-        search_filter = {
-            "$or": [
-                {"unique_code": {"$regex": search, "$options": "i"}},
-                {"title": {"$regex": search, "$options": "i"}},
-                {"music_composer": {"$regex": search, "$options": "i"}},
-                {"singer_name": {"$regex": search, "$options": "i"}},
-                {"album_name": {"$regex": search, "$options": "i"}}
-            ]
-        }
-        if "$or" in query:
-            # Combine role filter with search filter
-            query = {"$and": [query, search_filter]}
-        else:
-            query.update(search_filter)
+        query["$or"] = [
+            {"unique_code": {"$regex": search, "$options": "i"}},
+            {"title": {"$regex": search, "$options": "i"}},
+            {"music_composer": {"$regex": search, "$options": "i"}},
+            {"singer_name": {"$regex": search, "$options": "i"}},
+            {"album_name": {"$regex": search, "$options": "i"}}
+        ]
     
-    # Apply optional filters
+    # Apply specific field filters
     if composer:
         query["music_composer"] = {"$regex": composer, "$options": "i"}
     
@@ -1854,6 +1869,7 @@ async def get_tracks(
         query["rights_type"] = rights_type
     
     # Execute query and return results
+    logger.debug(f"Admin user {current_user.id} querying tracks with filters: {query}")
     tracks = await db.tracks.find(query).to_list(1000)
     return [MusicTrack(**parse_from_mongo(track)) for track in tracks]
 
