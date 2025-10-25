@@ -1281,7 +1281,9 @@ async def get_managers(current_user: User = Depends(get_current_user)):
     if current_user.user_type != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     
-    managers = await db.managers.find({"is_active": True}).to_list(1000)
+    # Since we're doing hard deletes, we don't need to filter by is_active
+    # But we can still filter to show only active managers if needed
+    managers = await db.managers.find({}).to_list(1000)
     return [Manager(**parse_from_mongo(manager)) for manager in managers]
 
 @api_router.get("/managers/{manager_id}", response_model=Manager)
@@ -1290,7 +1292,7 @@ async def get_manager(manager_id: str, current_user: User = Depends(get_current_
     if current_user.user_type != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
         
-    manager = await db.managers.find_one({"id": manager_id, "is_active": True})
+    manager = await db.managers.find_one({"id": manager_id})
     if not manager:
         raise HTTPException(status_code=404, detail="Manager not found")
     return Manager(**parse_from_mongo(manager))
@@ -1319,27 +1321,49 @@ async def update_manager(
 
 @api_router.delete("/managers/{manager_id}")
 async def delete_manager(manager_id: str, current_user: User = Depends(get_current_user)):
+    """
+    Permanently delete a manager and their associated user account (HARD DELETE).
+    This is a destructive operation that cannot be undone.
+    """
     # Only admins can delete managers
     if current_user.user_type != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
-        
-    manager = await db.managers.find_one({"id": manager_id, "is_active": True})
+    
+    # Find the manager record first
+    manager = await db.managers.find_one({"id": manager_id})
     if not manager:
         raise HTTPException(status_code=404, detail="Manager not found")
     
-    # Soft delete the manager - set is_active to False
-    await db.managers.update_one({"id": manager_id}, {"$set": {"is_active": False}})
-    
-    # Hard delete the associated user account from users collection
     manager_email = manager.get("email")
-    if manager_email:
-        delete_result = await db.users.delete_one({"email": manager_email})
-        if delete_result.deleted_count > 0:
-            logger.info(f"Deleted user account for manager {manager_email}")
-        else:
-            logger.warning(f"No user account found for manager {manager_email}")
+    manager_name = manager.get("name", "Unknown")
     
-    return {"message": "Manager and associated user account deleted successfully"}
+    logger.info(f"Admin {current_user.email} is permanently deleting manager: {manager_name} ({manager_email})")
+    
+    # Step 1: Permanently delete the associated user account from users collection
+    if manager_email:
+        user_delete_result = await db.users.delete_one({"email": manager_email})
+        if user_delete_result.deleted_count > 0:
+            logger.info(f"✓ Permanently deleted user account for {manager_email}")
+        else:
+            logger.warning(f"⚠ No user account found for manager {manager_email}")
+    else:
+        logger.warning(f"⚠ Manager {manager_id} has no email, skipping user account deletion")
+    
+    # Step 2: Permanently delete the manager record from managers collection
+    manager_delete_result = await db.managers.delete_one({"id": manager_id})
+    
+    if manager_delete_result.deleted_count > 0:
+        logger.info(f"✓ Permanently deleted manager record for {manager_name}")
+        return {
+            "message": f"Manager {manager_name} and their user account have been permanently deleted",
+            "deleted_manager": True,
+            "deleted_user": user_delete_result.deleted_count > 0 if manager_email else False
+        }
+    else:
+        # This shouldn't happen since we already checked existence, but handle it
+        logger.error(f"✗ Failed to delete manager record for {manager_id}")
+        raise HTTPException(status_code=500, detail="Failed to delete manager record")
+
 
 @api_router.get("/profile", response_model=dict)
 async def get_profile(current_user: User = Depends(get_current_user)):

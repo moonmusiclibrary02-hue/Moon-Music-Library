@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from './ui/dialog';
 import { ScrollArea } from './ui/scroll-area';
 import { toast } from 'sonner';
-import { Search, Music, Plus, Play, Pause, Download, Eye, Clock, User, Mic, Album, Grid, List, Filter, FileText, X, Users, Mail, Phone, Globe, Edit, Key } from 'lucide-react';
+import { Search, Music, Plus, Play, Pause, Download, Eye, Clock, User, Mic, Album, Grid, List, Filter, FileText, X, Users, Mail, Phone, Globe, Edit, Key, Trash2 } from 'lucide-react';
 
 const Dashboard = ({ apiClient }) => {
   const [tracks, setTracks] = useState([]);
@@ -409,29 +409,34 @@ const playTrack = async (track) => {
     return imageExtensions.some(ext => filename.toLowerCase().endsWith(ext));
   };
 
-  const deleteManager = async (managerId) => {
+  const handleDeleteManager = async (managerId) => {
     try {
       // Find the manager to show their name in confirmation
       const manager = managers.find(m => m.id === managerId);
       const managerName = manager ? manager.name : 'this manager';
+      const managerEmail = manager ? manager.email : '';
       
       const confirmed = window.confirm(
-        `Are you sure you want to delete ${managerName}?\n\n` +
-        `This will:\n` +
-        `- Remove the manager from the system\n` +
-        `- Delete their user account\n` +
-        `- This action cannot be undone`
+        `⚠️ PERMANENT DELETE WARNING ⚠️\n\n` +
+        `Are you sure you want to permanently delete ${managerName}?\n` +
+        `Email: ${managerEmail}\n\n` +
+        `This action will:\n` +
+        `✗ Permanently remove the manager from the system\n` +
+        `✗ Permanently delete their user account\n` +
+        `✗ Revoke all access immediately\n\n` +
+        `⚠️ THIS CANNOT BE UNDONE ⚠️\n\n` +
+        `Type YES in your mind and click OK to confirm.`
       );
       
       if (!confirmed) {
         return;
       }
 
-      toast.info('Deleting manager...');
+      toast.info('Permanently deleting manager...');
       
       const response = await apiClient.delete(`/managers/${managerId}`);
       
-      toast.success(response.data.message || 'Manager deleted successfully!');
+      toast.success(response.data.message || 'Manager permanently deleted successfully!');
       
       // Refresh the managers list
       await fetchManagers();
@@ -447,7 +452,7 @@ const playTrack = async (track) => {
         if (error.response.status === 403) {
           toast.error('You do not have permission to delete managers');
         } else if (error.response.status === 404) {
-          toast.error('Manager not found');
+          toast.error('Manager not found or already deleted');
         }
       } else if (error.request) {
         // Request made but no response
@@ -1331,12 +1336,12 @@ const playTrack = async (track) => {
                               <Button
                                 size="sm"
                                 variant="ghost"
-                                onClick={() => deleteManager(manager.id)}
-                                className="text-red-400 hover:text-red-300 h-8 w-8 p-0"
-                                title="Delete Manager"
+                                onClick={() => handleDeleteManager(manager.id)}
+                                className="text-red-500 hover:text-red-400 hover:bg-red-500/10 h-8 w-8 p-0"
+                                title="Permanently Delete Manager"
                                 data-testid={`delete-manager-${manager.id}`}
                               >
-                                <X className="h-4 w-4" />
+                                <Trash2 className="h-4 w-4" />
                               </Button>
                             </div>
                           </TableCell>
