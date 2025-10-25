@@ -1277,14 +1277,36 @@ async def create_manager(manager_data: ManagerCreate, current_user: User = Depen
 
 @api_router.get("/managers", response_model=List[Manager])
 async def get_managers(current_user: User = Depends(get_current_user)):
-    # Only admins can view managers list
+    """
+    Fetches all active managers with robust handling for legacy data formats.
+    """
     if current_user.user_type != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
-    
-    # Since we're doing hard deletes, we don't need to filter by is_active
-    # But we can still filter to show only active managers if needed
-    managers = await db.managers.find({}).to_list(1000)
-    return [Manager(**parse_from_mongo(manager)) for manager in managers]
+
+    try:
+        manager_records = await db.managers.find({"is_active": True}).to_list(1000)
+        
+        processed_managers = []
+        for manager in manager_records:
+            # --- THE FIX IS HERE ---
+            # Check the type of the 'assigned_language' field.
+            lang = manager.get("assigned_language")
+            
+            # If it's an old record with a string, convert it to a list.
+            if isinstance(lang, str):
+                manager["assigned_language"] = [lang]
+            # If it's missing or not a list, default it to an empty list.
+            elif not isinstance(lang, list):
+                manager["assigned_language"] = []
+            
+            # Now the data is guaranteed to match the Pydantic model.
+            processed_managers.append(Manager(**parse_from_mongo(manager)))
+            
+        return processed_managers
+
+    except Exception as e:
+        logger.exception("An error occurred while fetching or processing managers.")
+        raise HTTPException(status_code=500, detail="Failed to retrieve manager data.")
 
 @api_router.get("/managers/{manager_id}", response_model=Manager)
 async def get_manager(manager_id: str, current_user: User = Depends(get_current_user)):
