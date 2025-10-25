@@ -22,9 +22,9 @@ apiClient.interceptors.response.use(
       // And the error is specifically a 401 Unauthorized
       console.error("SESSION EXPIRED (401). Forcing logout.");
       
-      // Remove the bad token and redirect to the login page
+      // Remove the bad token and redirect to the auth page
       localStorage.removeItem('token');
-      window.location.href = '/login';
+      window.location.href = '/auth';
     }
     
     // For all other errors, let the component's .catch() handle it

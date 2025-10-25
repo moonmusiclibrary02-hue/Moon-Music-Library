@@ -433,7 +433,7 @@ const handleSubmit = async (event) => {
           description: "Please log in to upload tracks.",
           variant: "destructive" 
         });
-        navigate('/login');
+        navigate('/auth');
         return;
       }
       
