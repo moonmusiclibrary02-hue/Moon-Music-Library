@@ -155,9 +155,19 @@ const ManagerProfile = ({ apiClient }) => {
                         <div className="flex items-center space-x-2">
                           <Globe className="h-4 w-4 text-orange-500" />
                           <span className="text-gray-300 font-medium">Language:</span>
-                          <Badge className="bg-orange-500/20 text-orange-400">
-                            {profile.manager_details.assigned_language}
-                          </Badge>
+                          <div className="flex flex-wrap gap-1">
+                            {Array.isArray(profile.manager_details.assigned_language) ? (
+                              profile.manager_details.assigned_language.map((lang, index) => (
+                                <Badge key={index} className="bg-orange-500/20 text-orange-400">
+                                  {lang}
+                                </Badge>
+                              ))
+                            ) : (
+                              <Badge className="bg-orange-500/20 text-orange-400">
+                                {profile.manager_details.assigned_language}
+                              </Badge>
+                            )}
+                          </div>
                         </div>
                       )}
                     </div>
