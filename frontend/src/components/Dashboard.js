@@ -556,6 +556,29 @@ const playTrack = async (track) => {
         </p>
       </div>
 
+      {/* Warning for managers without assigned languages */}
+      {user?.user_type === 'manager' && (!user.manager_details?.assigned_language || user.manager_details.assigned_language.length === 0) && (
+        <Card className="glass border-yellow-500/30 bg-yellow-500/5 slide-in">
+          <CardContent className="p-4">
+            <div className="flex items-start space-x-3">
+              <div className="flex-shrink-0">
+                <svg className="h-6 w-6 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h3 className="text-yellow-400 font-semibold mb-1">Account Setup Pending</h3>
+                <p className="text-gray-300 text-sm">
+                  Your manager account is registered but you don't have permission to upload tracks yet. 
+                  Please contact the administrator to assign languages to your account. Once languages are assigned, 
+                  you'll be able to upload and manage tracks in those languages.
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Now Playing Bar */}
       {audioPlayer.currentTrack && (
         <Card className="glass border-orange-500/30 bg-orange-500/5 slide-in">
