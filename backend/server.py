@@ -121,7 +121,7 @@ class Manager(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     email: str
-    assigned_language: str
+    assigned_language: List[str]
     phone: Optional[str] = None
     is_active: bool = True
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -130,14 +130,14 @@ class Manager(BaseModel):
 class ManagerCreate(BaseModel):
     name: str
     email: str
-    assigned_language: str
+    assigned_language: List[str]
     phone: Optional[str] = None
     custom_password: Optional[str] = None  # Admin can set custom password
 
 class ManagerUpdate(BaseModel):
     name: Optional[str] = None
     email: Optional[str] = None
-    assigned_language: Optional[str] = None
+    assigned_language: Optional[List[str]] = None
     phone: Optional[str] = None
     is_active: Optional[bool] = None
 
@@ -1791,12 +1791,23 @@ async def get_tracks(
 ):
     query = {}
     
-    # Role-based filtering: Managers can only see their own tracks
+    # Role-based filtering: Managers can only see tracks in their assigned languages
     if current_user.user_type == "manager":
-        query["$or"] = [
-            {"created_by": current_user.id},  # Tracks created by this manager
-            {"managed_by": current_user.manager_id}  # Tracks assigned to this manager
-        ]
+        # Fetch the manager's record to get their assigned languages
+        manager = await db.managers.find_one({"id": current_user.manager_id})
+        
+        if manager:
+            manager_languages = manager.get("assigned_language", [])
+            
+            if manager_languages:
+                # Filter tracks by languages assigned to this manager
+                query["audio_language"] = {"$in": manager_languages}
+            else:
+                # Manager has no assigned languages, return no tracks
+                query["_id"] = ObjectId()  # This will never match, ensuring empty result
+        else:
+            # Manager record not found, return no tracks
+            query["_id"] = ObjectId()
     # Admins can see all tracks (no additional filter)
     
     if search:
