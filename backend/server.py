@@ -2509,9 +2509,7 @@ async def cleanup_upload(
             detail="Failed to clean up file"
         ) from None
 
-# Include the router in the main app
-app.include_router(api_router)
-
+# Add CORS middleware BEFORE including the router
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -2520,6 +2518,9 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"]
 )
+
+# Include the router in the main app
+app.include_router(api_router)
 
 # Configure logging
 logging.basicConfig(
