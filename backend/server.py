@@ -1746,15 +1746,16 @@ async def create_track(
         music_director_agreement_filename = music_director_agreement_file.filename
     # else: use music_director_agreement_blob_name and music_director_agreement_filename from Form parameters
     
-    # For managers, validate that they're uploading in their assigned language
+    # For managers, validate that they're uploading in their assigned language(s)
     if current_user.user_type == "manager" and current_user.manager_id:
         manager_record = await db.managers.find_one({"id": current_user.manager_id})
-        if manager_record and manager_record.get("assigned_language"):
-            assigned_language = manager_record["assigned_language"]
-            if audio_language != assigned_language:
+        if manager_record:
+            assigned_languages = manager_record.get("assigned_language", [])
+            # assigned_language is now an array of languages
+            if assigned_languages and audio_language not in assigned_languages:
                 raise HTTPException(
                     status_code=400, 
-                    detail=f"You can only upload tracks in your assigned language: {assigned_language}"
+                    detail=f"You can only upload tracks in your assigned languages: {', '.join(assigned_languages)}"
                 )
         # Auto-set managed_by for manager uploads
         managed_by = current_user.manager_id
