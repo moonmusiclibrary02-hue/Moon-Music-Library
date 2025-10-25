@@ -1884,9 +1884,24 @@ async def delete_track(track_id: str, current_user: User = Depends(get_current_u
     if not track:
         raise HTTPException(status_code=404, detail="Track not found")
 
-    # Step 2: Authorization (This logic remains unchanged)
+    # Step 2: Authorization - Language-based access for managers
     if current_user.user_type == "manager":
-        if track.get("created_by") != current_user.id and track.get("managed_by") != current_user.manager_id:
+        # Fetch manager record to get assigned languages
+        manager_record = await db.managers.find_one({"id": current_user.manager_id})
+        
+        if not manager_record:
+            logger.warning(f"Manager record not found for user_id={current_user.id}, manager_id={current_user.manager_id}")
+            raise HTTPException(status_code=403, detail="Manager profile not found")
+        
+        manager_languages = manager_record.get("assigned_language", [])
+        track_language = track.get("audio_language", "")
+        
+        # Check if track's language is in manager's assigned languages
+        if track_language not in manager_languages:
+            logger.warning(
+                f"Manager {current_user.manager_id} attempted to delete track {track_id} "
+                f"with language '{track_language}' not in their assigned languages {manager_languages}"
+            )
             raise HTTPException(status_code=403, detail="Not authorized to delete this track")
 
     # Step 3: Delete all associated files from Google Cloud Storage
@@ -2016,9 +2031,24 @@ async def get_track_details(track_id: str, current_user: User = Depends(get_curr
     if not track:
         raise HTTPException(status_code=404, detail="Track not found")
     
-    # Authorization check: Managers can only view their own tracks
+    # Authorization check: Language-based access for managers
     if current_user.user_type == "manager":
-        if track.get("created_by") != current_user.id and track.get("managed_by") != current_user.manager_id:
+        # Fetch manager record to get assigned languages
+        manager_record = await db.managers.find_one({"id": current_user.manager_id})
+        
+        if not manager_record:
+            logger.warning(f"Manager record not found for user_id={current_user.id}, manager_id={current_user.manager_id}")
+            raise HTTPException(status_code=403, detail="Manager profile not found")
+        
+        manager_languages = manager_record.get("assigned_language", [])
+        track_language = track.get("audio_language", "")
+        
+        # Check if track's language is in manager's assigned languages
+        if track_language not in manager_languages:
+            logger.warning(
+                f"Manager {current_user.manager_id} attempted to view track {track_id} "
+                f"with language '{track_language}' not in their assigned languages {manager_languages}"
+            )
             raise HTTPException(status_code=403, detail="Not authorized to view this track")
 
     return MusicTrack(**parse_from_mongo(track))
@@ -2028,10 +2058,28 @@ async def get_track_download_url(track_id: str, file_type: str, current_user: Us
     """Generates and returns a download URL by calling the robust helper function."""
     try:
         track = await db.tracks.find_one({"id": track_id})
-        if not track: raise HTTPException(status_code=404, detail="Track not found")
+        if not track: 
+            raise HTTPException(status_code=404, detail="Track not found")
 
-        if current_user.user_type == "manager" and track.get("created_by") != current_user.id and track.get("managed_by") != current_user.manager_id:
-            raise HTTPException(status_code=403, detail="Not authorized")
+        # Authorization check: Language-based access for managers
+        if current_user.user_type == "manager":
+            # Fetch manager record to get assigned languages
+            manager_record = await db.managers.find_one({"id": current_user.manager_id})
+            
+            if not manager_record:
+                logger.warning(f"Manager record not found for user_id={current_user.id}, manager_id={current_user.manager_id}")
+                raise HTTPException(status_code=403, detail="Manager profile not found")
+            
+            manager_languages = manager_record.get("assigned_language", [])
+            track_language = track.get("audio_language", "")
+            
+            # Check if track's language is in manager's assigned languages
+            if track_language not in manager_languages:
+                logger.warning(
+                    f"Manager {current_user.manager_id} attempted to download track {track_id} "
+                    f"with language '{track_language}' not in their assigned languages {manager_languages}"
+                )
+                raise HTTPException(status_code=403, detail="Not authorized to access this track")
 
         blob_field_map = { "mp3": "mp3_blob_name", "lyrics": "lyrics_blob_name", "session": "session_blob_name", "singer_agreement": "singer_agreement_blob_name", "music_director_agreement": "music_director_agreement_blob_name" }
         blob_field = blob_field_map.get(file_type)
@@ -2061,10 +2109,28 @@ async def get_track_stream_url(track_id: str, current_user: User = Depends(get_c
     """Generates and returns a stream URL by calling the robust helper function."""
     try:
         track = await db.tracks.find_one({"id": track_id})
-        if not track: raise HTTPException(status_code=404, detail="Track not found")
+        if not track: 
+            raise HTTPException(status_code=404, detail="Track not found")
         
-        if current_user.user_type == "manager" and track.get("created_by") != current_user.id and track.get("managed_by") != current_user.manager_id:
-            raise HTTPException(status_code=403, detail="Not authorized")
+        # Authorization check: Language-based access for managers
+        if current_user.user_type == "manager":
+            # Fetch manager record to get assigned languages
+            manager_record = await db.managers.find_one({"id": current_user.manager_id})
+            
+            if not manager_record:
+                logger.warning(f"Manager record not found for user_id={current_user.id}, manager_id={current_user.manager_id}")
+                raise HTTPException(status_code=403, detail="Manager profile not found")
+            
+            manager_languages = manager_record.get("assigned_language", [])
+            track_language = track.get("audio_language", "")
+            
+            # Check if track's language is in manager's assigned languages
+            if track_language not in manager_languages:
+                logger.warning(
+                    f"Manager {current_user.manager_id} attempted to access track {track_id} "
+                    f"with language '{track_language}' not in their assigned languages {manager_languages}"
+                )
+                raise HTTPException(status_code=403, detail="Not authorized to access this track")
 
         blob_name = track.get("mp3_blob_name")
         if not blob_name:
@@ -2150,9 +2216,24 @@ async def update_track(
     if not track:
         raise HTTPException(status_code=404, detail="Track not found")
     
-    # Authorization: Admins can edit any track, Managers can only edit their own tracks
+    # Authorization: Language-based access for managers
     if current_user.user_type == "manager":
-        if track["created_by"] != current_user.id and track.get("managed_by") != current_user.manager_id:
+        # Fetch manager record to get assigned languages
+        manager_record = await db.managers.find_one({"id": current_user.manager_id})
+        
+        if not manager_record:
+            logger.warning(f"Manager record not found for user_id={current_user.id}, manager_id={current_user.manager_id}")
+            raise HTTPException(status_code=403, detail="Manager profile not found")
+        
+        manager_languages = manager_record.get("assigned_language", [])
+        track_language = track.get("audio_language", "")
+        
+        # Check if track's language is in manager's assigned languages
+        if track_language not in manager_languages:
+            logger.warning(
+                f"Manager {current_user.manager_id} attempted to update track {track_id} "
+                f"with language '{track_language}' not in their assigned languages {manager_languages}"
+            )
             raise HTTPException(status_code=403, detail="Not authorized to update this track")
     # Admins can edit any track (no additional check needed)
     
