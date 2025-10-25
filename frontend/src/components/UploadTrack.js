@@ -62,6 +62,9 @@ const UploadTrack = ({ apiClient }) => {
   const navigate = useNavigate();
   const { toast } = useToast();
   const [loading, setLoading] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [managers, setManagers] = useState([]);
+  const [selectedManager, setSelectedManager] = useState('');
   const [formData, setFormData] = useState({
     rights_type: '',
     track_category: '',
@@ -164,6 +167,41 @@ const UploadTrack = ({ apiClient }) => {
     const timer = setTimeout(() => retryPendingCleanups(), 2000);
     return () => clearTimeout(timer);
   }, [cleanupBlobs]);
+
+  // Fetch current user and managers list on component mount
+  useEffect(() => {
+    const fetchUserAndManagers = async () => {
+      try {
+        const token = localStorage.getItem('token');
+        if (!token) {
+          return;
+        }
+
+        // Fetch current user details
+        const userResponse = await apiClient.get('/auth/me', {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+        setCurrentUser(userResponse.data);
+
+        // If user is admin, fetch managers list
+        if (userResponse.data?.user_type === 'admin') {
+          const managersResponse = await apiClient.get('/managers', {
+            headers: {
+              'Authorization': `Bearer ${token}`
+            }
+          });
+          setManagers(managersResponse.data || []);
+        }
+      } catch (error) {
+        console.error('Error fetching user or managers:', error);
+        // Don't show error toast as this is non-critical for the form to work
+      }
+    };
+
+    fetchUserAndManagers();
+  }, [apiClient]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -487,7 +525,12 @@ const handleSubmit = async (event) => {
         }
       });
 
-      // 2. Append the blob names and filenames from the successful uploads
+      // 2. Append the selected manager's ID if admin has selected one
+      if (currentUser?.user_type === 'admin' && selectedManager) {
+        trackMetadata.append('managed_by', selectedManager);
+      }
+
+      // 3. Append the blob names and filenames from the successful uploads
       Object.entries(fileResults).forEach(([fileType, data]) => {
         // Use the blobFieldMap to get correct backend field names
         const [blobField, filenameField] = blobFieldMap[fileType];
@@ -805,6 +848,38 @@ const handleSubmit = async (event) => {
                 </div>
               )}
             </div>
+
+            {/* Managed By - only show for admin users */}
+            {currentUser?.user_type === 'admin' && (
+              <div className="space-y-2">
+                <Label htmlFor="managed_by" className="text-gray-300">Managed By</Label>
+                <Select 
+                  value={selectedManager} 
+                  onValueChange={(value) => setSelectedManager(value)}
+                >
+                  <SelectTrigger className="bg-gray-800/50 border-gray-600 text-white" data-testid="managed-by-select">
+                    <SelectValue placeholder="Select a manager (optional)" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-gray-800 border-gray-600">
+                    {managers.length > 0 ? (
+                      managers.map((manager) => (
+                        <SelectItem 
+                          key={manager.id} 
+                          value={manager.id} 
+                          className="text-white hover:bg-gray-700"
+                        >
+                          {manager.name}
+                        </SelectItem>
+                      ))
+                    ) : (
+                      <SelectItem value="no-managers" disabled className="text-gray-500">
+                        No managers available
+                      </SelectItem>
+                    )}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
           </CardContent>
         </Card>
 
