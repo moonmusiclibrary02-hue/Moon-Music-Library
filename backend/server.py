@@ -1135,11 +1135,12 @@ async def register(user_data: UserCreate):
     if existing_user:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    # Create user
+    # Create user with manager role by default (not admin for security)
     hashed_password = get_password_hash(user_data.password)
     user = User(
         username=user_data.username,
-        email=user_data.email
+        email=user_data.email,
+        user_type="manager"  # Explicitly set to manager, not admin
     )
     
     user_dict = user.dict()
@@ -1326,9 +1327,19 @@ async def delete_manager(manager_id: str, current_user: User = Depends(get_curre
     if not manager:
         raise HTTPException(status_code=404, detail="Manager not found")
     
-    # Soft delete - set is_active to False
+    # Soft delete the manager - set is_active to False
     await db.managers.update_one({"id": manager_id}, {"$set": {"is_active": False}})
-    return {"message": "Manager deleted successfully"}
+    
+    # Hard delete the associated user account from users collection
+    manager_email = manager.get("email")
+    if manager_email:
+        delete_result = await db.users.delete_one({"email": manager_email})
+        if delete_result.deleted_count > 0:
+            logger.info(f"Deleted user account for manager {manager_email}")
+        else:
+            logger.warning(f"No user account found for manager {manager_email}")
+    
+    return {"message": "Manager and associated user account deleted successfully"}
 
 @api_router.get("/profile", response_model=dict)
 async def get_profile(current_user: User = Depends(get_current_user)):
@@ -1751,6 +1762,7 @@ async def get_tracks(
     singer: Optional[str] = None,
     album: Optional[str] = None,
     language: Optional[str] = None,
+    rights_type: Optional[str] = None,
     current_user: User = Depends(get_current_user)
 ):
     query = {}
@@ -1790,6 +1802,9 @@ async def get_tracks(
     
     if language:
         query["audio_language"] = {"$regex": language, "$options": "i"}
+    
+    if rights_type:
+        query["rights_type"] = rights_type
     
     tracks = await db.tracks.find(query).to_list(1000)
     return [MusicTrack(**parse_from_mongo(track)) for track in tracks]

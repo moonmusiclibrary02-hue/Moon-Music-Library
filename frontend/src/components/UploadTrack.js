@@ -1029,7 +1029,7 @@ const handleSubmit = async (event) => {
               <div className="space-y-2">
                 <Label htmlFor="singer_agreement_file" className="text-gray-300 flex items-center space-x-2">
                   <FileText className="h-4 w-4" />
-                  <span>Singer Agreement</span>
+                  <span>Singer Agreement <span className="text-gray-400 text-sm">(PDF, DOC, JPG, etc.)</span></span>
                 </Label>
                 <input
                   type="file"
@@ -1090,7 +1090,7 @@ const handleSubmit = async (event) => {
               <div className="space-y-2">
                 <Label htmlFor="music_director_agreement_file" className="text-gray-300 flex items-center space-x-2">
                   <FileText className="h-4 w-4" />
-                  <span>Music Director Agreement</span>
+                  <span>Music Director Agreement <span className="text-gray-400 text-sm">(PDF, DOC, JPG, etc.)</span></span>
                 </Label>
                 <input
                   type="file"
