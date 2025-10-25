@@ -1135,12 +1135,24 @@ async def register(user_data: UserCreate):
     if existing_user:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    # Create user with manager role by default (not admin for security)
+    # Create manager record first (without assigned languages - admin will assign later)
+    manager = Manager(
+        name=user_data.username,
+        assigned_language=[],  # Empty - admin must assign languages before manager can upload
+        phone=None,
+        is_active=True  # Active but can't upload until languages are assigned
+    )
+    
+    manager_dict = prepare_for_mongo(manager.dict())
+    await db.managers.insert_one(manager_dict)
+    
+    # Create user with manager role and link to manager record
     hashed_password = get_password_hash(user_data.password)
     user = User(
         username=user_data.username,
         email=user_data.email,
-        user_type="manager"  # Explicitly set to manager, not admin
+        user_type="manager",  # Explicitly set to manager, not admin
+        manager_id=manager.id  # Link to manager record
     )
     
     user_dict = user.dict()
@@ -1746,17 +1758,37 @@ async def create_track(
         music_director_agreement_filename = music_director_agreement_file.filename
     # else: use music_director_agreement_blob_name and music_director_agreement_filename from Form parameters
     
-    # For managers, validate that they're uploading in their assigned language(s)
-    if current_user.user_type == "manager" and current_user.manager_id:
+    # For managers, validate that they have assigned languages and are uploading in those languages
+    if current_user.user_type == "manager":
+        if not current_user.manager_id:
+            raise HTTPException(
+                status_code=403, 
+                detail="Manager account not properly configured. Please contact admin."
+            )
+        
         manager_record = await db.managers.find_one({"id": current_user.manager_id})
-        if manager_record:
-            assigned_languages = manager_record.get("assigned_language", [])
-            # assigned_language is now an array of languages
-            if assigned_languages and audio_language not in assigned_languages:
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"You can only upload tracks in your assigned languages: {', '.join(assigned_languages)}"
-                )
+        if not manager_record:
+            raise HTTPException(
+                status_code=403, 
+                detail="Manager profile not found. Please contact admin."
+            )
+        
+        assigned_languages = manager_record.get("assigned_language", [])
+        
+        # Block upload if no languages assigned
+        if not assigned_languages or len(assigned_languages) == 0:
+            raise HTTPException(
+                status_code=403, 
+                detail="You don't have permission to upload tracks yet. Please wait for admin to assign languages to your account."
+            )
+        
+        # Validate that track language is in assigned languages
+        if audio_language not in assigned_languages:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"You can only upload tracks in your assigned languages: {', '.join(assigned_languages)}"
+            )
+        
         # Auto-set managed_by for manager uploads
         managed_by = current_user.manager_id
 
