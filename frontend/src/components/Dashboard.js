@@ -189,7 +189,9 @@ const Dashboard = ({ apiClient }) => {
       setManagerForm({
         name: manager.name,
         email: manager.email,
-        assigned_language: manager.assigned_language,
+        assigned_language: Array.isArray(manager.assigned_language) 
+          ? manager.assigned_language[0] || '' 
+          : manager.assigned_language,
         phone: manager.phone || '',
         custom_password: ''  // Don't prefill password for editing
       });
@@ -215,11 +217,19 @@ const Dashboard = ({ apiClient }) => {
         return;
       }
       
+      // Convert assigned_language to array format for backend
+      const managerPayload = {
+        ...managerForm,
+        assigned_language: Array.isArray(managerForm.assigned_language) 
+          ? managerForm.assigned_language 
+          : [managerForm.assigned_language]
+      };
+      
       if (managerModal.editing) {
-        await apiClient.put(`/managers/${managerModal.manager.id}`, managerForm);
+        await apiClient.put(`/managers/${managerModal.manager.id}`, managerPayload);
         toast.success('Manager updated successfully!');
       } else {
-        const response = await apiClient.post('/managers', managerForm);
+        const response = await apiClient.post('/managers', managerPayload);
         const newManager = response.data;
         
         // Show credentials after successful creation
@@ -531,7 +541,11 @@ const playTrack = async (track) => {
         </h1>
         <p className="text-lg text-gray-400">
           {user?.user_type === 'manager' 
-            ? `Manage your ${user.manager_details?.assigned_language || ''} music uploads` 
+            ? `Manage your ${
+                Array.isArray(user.manager_details?.assigned_language) 
+                  ? user.manager_details.assigned_language.join(', ') 
+                  : user.manager_details?.assigned_language || ''
+              } music uploads` 
             : 'Manage and organize your music production assets'
           }
         </p>
@@ -1298,9 +1312,19 @@ const playTrack = async (track) => {
                           <TableCell className="text-gray-300">
                             <div className="flex items-center space-x-2">
                               <Globe className="h-4 w-4 text-orange-500" />
-                              <Badge className="bg-orange-500/20 text-orange-400 border-orange-500/30">
-                                {manager.assigned_language}
-                              </Badge>
+                              <div className="flex flex-wrap gap-1">
+                                {Array.isArray(manager.assigned_language) ? (
+                                  manager.assigned_language.map((lang, index) => (
+                                    <Badge key={index} className="bg-orange-500/20 text-orange-400 border-orange-500/30">
+                                      {lang}
+                                    </Badge>
+                                  ))
+                                ) : (
+                                  <Badge className="bg-orange-500/20 text-orange-400 border-orange-500/30">
+                                    {manager.assigned_language}
+                                  </Badge>
+                                )}
+                              </div>
                             </div>
                           </TableCell>
                           <TableCell>
